@@ -197,12 +197,25 @@ interface ConnectionOwner {
   readonly source: ConnectionGenerationSource
   readonly controller: ConnectionController
   readonly stopNetworkWatch: () => void
+  readonly stopResumeWatch: () => void
 }
 
 interface BrowserNetworkTarget {
   readonly navigator?: { readonly onLine?: boolean }
   addEventListener(type: 'online' | 'offline', listener: () => void): void
   removeEventListener(type: 'online' | 'offline', listener: () => void): void
+}
+
+interface BrowserPageShowEvent {
+  readonly persisted?: boolean
+}
+
+interface BrowserResumeTarget {
+  readonly visibilityState: 'visible' | 'hidden'
+  addEventListener(type: 'visibilitychange', listener: () => void): void
+  addEventListener(type: 'pageshow', listener: (event: BrowserPageShowEvent) => void): void
+  removeEventListener(type: 'visibilitychange', listener: () => void): void
+  removeEventListener(type: 'pageshow', listener: (event: BrowserPageShowEvent) => void): void
 }
 
 function watchBrowserNetwork(controller: ConnectionController): () => void {
@@ -217,6 +230,45 @@ function watchBrowserNetwork(controller: ConnectionController): () => void {
   return () => {
     browser.removeEventListener('online', online)
     browser.removeEventListener('offline', offline)
+  }
+}
+
+/**
+ * Re-handshake the owned loop when a page returns from the background: a
+ * suspended mobile page can keep its socket half-open while the Client still
+ * reports connected, so a long hide or a bfcache restore replaces the
+ * generation instead of trusting it.
+ * @param controller - loop whose current generation should be replaced.
+ * @param config - resolved recovery timing carrying the hidden-duration threshold.
+ * @returns cleanup removing both page listeners.
+ */
+function watchBrowserResume(
+  controller: ConnectionController,
+  config: Required<ConnectionRecoveryConfig>,
+): () => void {
+  const page = (globalThis as { readonly document?: BrowserResumeTarget }).document
+  if (page === undefined) return () => {}
+  let hiddenAt: number | undefined
+  const onVisibilityChange = (): void => {
+    if (page.visibilityState === 'hidden') {
+      hiddenAt = Date.now()
+      return
+    }
+    const hiddenSince = hiddenAt
+    hiddenAt = undefined
+    if (hiddenSince === undefined || Date.now() - hiddenSince < config.resumeReconnectAfterMs) return
+    controller.reconnect()
+  }
+  const onPageShow = (event: BrowserPageShowEvent): void => {
+    if (event.persisted !== true) return
+    hiddenAt = undefined
+    controller.reconnect()
+  }
+  page.addEventListener('visibilitychange', onVisibilityChange)
+  page.addEventListener('pageshow', onPageShow)
+  return () => {
+    page.removeEventListener('visibilitychange', onVisibilityChange)
+    page.removeEventListener('pageshow', onPageShow)
   }
 }
 
@@ -264,6 +316,7 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
     if (owner !== current) return
     owner = undefined
     current.stopNetworkWatch()
+    current.stopResumeWatch()
     current.controller.stop()
     publishGeneration(undefined)
     publishState(undefined)
@@ -308,6 +361,7 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
       if (source === undefined) throw new Error('connection: no generation source is registered')
       const token = {}
       const ownsGeneration = (): boolean => owner?.token === token
+      const recoveryConfig = resolveConnectionConfig({ ...recovery, ...config })
       const controller = new ConnectionController(source, {
         ...sinks,
         onConnected: (host) => {
@@ -324,8 +378,14 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
           publishState(state)
           sinks.onStateChange?.(state)
         },
-      }, { ...recovery, ...config })
-      const current = { token, source, controller, stopNetworkWatch: watchBrowserNetwork(controller) }
+      }, recoveryConfig)
+      const current = {
+        token,
+        source,
+        controller,
+        stopNetworkWatch: watchBrowserNetwork(controller),
+        stopResumeWatch: watchBrowserResume(controller, recoveryConfig),
+      }
       owner = current
       controller.start()
       return {

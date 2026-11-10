@@ -10,6 +10,7 @@ describe('connection recovery configuration', () => {
       backoffMaxMs: 10_000,
       generationReadyWarnMs: 3_000,
       generationReadyTimeoutMs: 15_000,
+      resumeReconnectAfterMs: 5_000,
     })
   })
 
@@ -21,6 +22,7 @@ describe('connection recovery configuration', () => {
     { backoffMaxMs: -1 },
     { generationReadyWarnMs: NaN },
     { generationReadyTimeoutMs: 2_147_483_648 },
+    { resumeReconnectAfterMs: 2_147_483_648 },
     { generationReadyTimeoutMs: '15000' },
   ])('rejects timing that could disable recovery or overflow a timer: %j', (config) => {
     expect(() => resolveConnectionConfig(config)).toThrow()

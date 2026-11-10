@@ -280,6 +280,7 @@ describe('connection node half', () => {
         kind: 'global', name: '__DSH_CONNECTION_RECOVERY__', value: {
           backoffBaseMs: 500, backoffFactor: 2, backoffMaxMs: 10_000,
           generationReadyWarnMs: 3_000, generationReadyTimeoutMs: 25_000,
+          resumeReconnectAfterMs: 5_000,
         },
       }])
       await dispose()

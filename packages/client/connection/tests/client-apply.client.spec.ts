@@ -35,6 +35,24 @@ class BrowserNetworkProbe extends EventTarget {
   }
 }
 
+class BrowserPageProbe extends EventTarget {
+  visibilityState: 'visible' | 'hidden' = 'visible'
+
+  hide(): void {
+    this.visibilityState = 'hidden'
+    this.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  show(): void {
+    this.visibilityState = 'visible'
+    this.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  restoreFromCache(persisted: boolean): void {
+    this.dispatchEvent(Object.assign(new Event('pageshow'), { persisted }))
+  }
+}
+
 class GenerationProbe {
   private readonly active = new Set<() => void>()
 
@@ -70,6 +88,25 @@ async function mount(): Promise<ConnectionHandle> {
   const handle = ctx.get('connection') as ConnectionHandle | undefined
   if (handle === undefined) throw new Error('ctx.connection not provided')
   return handle
+}
+
+const RESUME_TIMING = {
+  backoffBaseMs: 60_000,
+  backoffFactor: 2,
+  backoffMaxMs: 120_000,
+  generationReadyTimeoutMs: 500,
+  resumeReconnectAfterMs: 2_000,
+}
+
+async function startResumeLoop(handle: ConnectionHandle, requested: () => void): Promise<ReturnType<ConnectionHandle['start']>> {
+  installGeneration(handle)
+  const loop = handle.start({ onReconnectRequested: requested }, RESUME_TIMING)
+  await vi.advanceTimersByTimeAsync(0)
+  return loop
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let round = 0; round < 4; round++) await vi.advanceTimersByTimeAsync(0)
 }
 
 describe('connection client apply', () => {
@@ -622,6 +659,116 @@ describe('connection client apply', () => {
       ['/api', 'goals/create?unsafe'],
     ] as const) {
       await expect(handle.rpc.call(channel, endpoint, {})).rejects.toThrow('invalid RPC target')
+    }
+  })
+
+  it('keeps the current generation when a hide ends below the resume threshold', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const page = new BrowserPageProbe()
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    const requested = vi.fn()
+    const loop = await startResumeLoop(handle, requested)
+    try {
+      page.hide()
+      await vi.advanceTimersByTimeAsync(1_999)
+      page.show()
+      await flushMicrotasks()
+      expect(requested).not.toHaveBeenCalled()
+      expect(handle.generation.getSnapshot()?.id).toBe(1)
+    } finally {
+      loop.stop()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('replaces the generation once when a hide reaches the resume threshold', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const page = new BrowserPageProbe()
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    const requested = vi.fn()
+    const loop = await startResumeLoop(handle, requested)
+    try {
+      page.hide()
+      await vi.advanceTimersByTimeAsync(2_000)
+      page.show()
+      await flushMicrotasks()
+      expect(requested).toHaveBeenCalledOnce()
+      expect(handle.generation.getSnapshot()?.id).toBe(2)
+
+      page.show()
+      await flushMicrotasks()
+      expect(requested).toHaveBeenCalledOnce()
+    } finally {
+      loop.stop()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('replaces the generation immediately on a bfcache pageshow', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const page = new BrowserPageProbe()
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    const requested = vi.fn()
+    const loop = await startResumeLoop(handle, requested)
+    try {
+      page.restoreFromCache(false)
+      await flushMicrotasks()
+      expect(requested).not.toHaveBeenCalled()
+
+      page.restoreFromCache(true)
+      await flushMicrotasks()
+      expect(requested).toHaveBeenCalledOnce()
+      expect(handle.generation.getSnapshot()?.id).toBe(2)
+    } finally {
+      loop.stop()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('ignores page resume events after the loop stops', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const page = new BrowserPageProbe()
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    const requested = vi.fn()
+    const loop = await startResumeLoop(handle, requested)
+    try {
+      page.hide()
+      await vi.advanceTimersByTimeAsync(2_000)
+      loop.stop()
+      page.show()
+      page.restoreFromCache(true)
+      await flushMicrotasks()
+      expect(requested).not.toHaveBeenCalled()
+      expect(handle.generation.getSnapshot()).toBeUndefined()
+    } finally {
+      loop.stop()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('starts without a document in a non-browser runtime', async () => {
+    expect(globalThis).not.toHaveProperty('document')
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    installGeneration(handle)
+    const loop = handle.start({}, RESUME_TIMING)
+    try {
+      await vi.waitFor(() => { expect(handle.state.getSnapshot()).toBe('connected') })
+      expect(handle.generation.getSnapshot()?.id).toBe(1)
+    } finally {
+      loop.stop()
     }
   })
 
