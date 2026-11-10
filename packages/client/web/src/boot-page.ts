@@ -14,6 +14,12 @@ function div(className: string | undefined, text?: string): HTMLDivElement {
   return el
 }
 
+/** Reload the page so a failed bootstrap can start over from a clean document. */
+function reloadPage(): void {
+  /* v8 ignore next -- jsdom cannot navigate; a served page always carries a location. */
+  globalThis.location.reload()
+}
+
 /** Kernel-owned page mounted below the application's root element. */
 export class BootPage {
   private readonly root: HTMLDivElement
@@ -23,16 +29,20 @@ export class BootPage {
   private readonly hint: HTMLDivElement
   private readonly states = new Map<string, LoaderEntryState>()
   private readonly active = new Set<string>()
+  private readonly reload: () => void
   private total = 0
   private failure: string | undefined
 
   /**
    * Build and attach the boot page.
    * @param container - Application mount point.
+   * @param reload - Recovery action for the failure report; a standalone
+   * browser window or an installed app has no reload control of its own.
    */
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, reload: () => void = reloadPage) {
     this.root = div(css.boot)
     this.root.dataset.dshBoot = ''
+    this.reload = reload
     this.card = div(css.card)
     this.wordmark = div(css.wordmark, 'HARNESS')
     this.spinner = div(css.spinner)
@@ -92,7 +102,19 @@ export class BootPage {
     report.append(div(css.failedTitle, 'Failed to load plugins'))
     for (const id of failed) report.append(div(css.failedItem, id))
     if (this.failure !== undefined) report.append(div(css.failedItem, this.failure))
+    report.append(this.retryButton())
     this.card.replaceChildren(this.wordmark, report)
+  }
+
+  /** Build the failure report's recovery control; an installed app has no browser reload. */
+  private retryButton(): HTMLButtonElement {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = css.retry ?? ''
+    button.dataset.dshBootRetry = ''
+    button.textContent = 'Reload'
+    button.addEventListener('click', () => { this.reload() })
+    return button
   }
 
   /** Grow the rotating arc monotonically as loader entries activate. */
