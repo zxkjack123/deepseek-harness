@@ -375,24 +375,35 @@ interface SessionStatus {
   trailingLabel?: string
 }
 
+/** Label for direct-child activity; a row whose active children are all external says so. */
+function subagentsRunningKey(
+  count: number,
+  external: number,
+): 'status.subagentsRunning.one' | 'status.subagentsRunning.other'
+  | 'status.externalSubagentsRunning.one' | 'status.externalSubagentsRunning.other' {
+  if (external > 0 && external === count) {
+    return count === 1 ? 'status.externalSubagentsRunning.one' : 'status.externalSubagentsRunning.other'
+  }
+  return count === 1 ? 'status.subagentsRunning.one' : 'status.subagentsRunning.other'
+}
+
 /**
  * Session status presentation; pending interaction is primary and live activity
  * outranks completion reminders.
  */
 function sessionStatuses(
-  node: Pick<SessionNode, 'pendingInteraction' | 'running' | 'runningSubagentCount' | 'completed'>,
+  node: Pick<
+    SessionNode,
+    'pendingInteraction' | 'running' | 'runningSubagentCount' | 'externalSubagentCount' | 'completed'
+  >,
   t: RowTranslate,
 ): readonly [SessionStatus, ...SessionStatus[]] {
-  const subagents: SessionStatus | undefined = node.runningSubagentCount === 0
+  const count = node.runningSubagentCount
+  const subagents: SessionStatus | undefined = count === 0
     ? undefined
     : {
       state: 'ongoing',
-      label: t(
-        node.runningSubagentCount === 1
-          ? 'status.subagentsRunning.one'
-          : 'status.subagentsRunning.other',
-        { n: node.runningSubagentCount },
-      ),
+      label: t(subagentsRunningKey(count, node.externalSubagentCount ?? 0), { n: count }),
     }
   let pending: SessionStatus | undefined
   switch (node.pendingInteraction) {

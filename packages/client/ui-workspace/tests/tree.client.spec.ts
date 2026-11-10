@@ -428,6 +428,72 @@ describe('deriveGroups', () => {
     expect(counts(statuses)).toEqual([0, 0, 0])
   })
 
+  it('counts a running child from its list row when the parent catalog is absent', () => {
+    const parent = summary('parent', 1)
+    const running = {
+      ...summary('running', 2), parentId: parent.id, origin: 'subagent' as const, running: true,
+    }
+    const inactive = {
+      ...summary('inactive', 3), parentId: parent.id, origin: 'subagent' as const, running: false,
+    }
+    const sessions = list(parent, running, inactive)
+    const counts = [
+      deriveGroups(sessions, [workspace('first', ['parent'])], noRows, noAttention, view(['first']))[0]!.sessions[0]!.runningSubagentCount,
+      deriveFlat(sessions, sessionMemberIds(sessions), noRows, noAttention)[0]!.runningSubagentCount,
+      deriveSearchResults(sessions, [], 'parent', noArchive, 'default', noAttention, { items: [], hasMore: false }, 10).items[0]!.runningSubagentCount,
+    ]
+    expect(counts).toEqual([1, 1, 1])
+  })
+
+  it('counts a child named by both the catalog and its list row once', () => {
+    const parent = summary('parent', 1)
+    const child = {
+      ...summary('child', 2), parentId: parent.id, origin: 'subagent' as const, running: true,
+    }
+    const sessions = {
+      ...list(parent, child),
+      projectionsBySession: { [parent.id]: catalog('child') },
+    }
+    expect(deriveFlat(sessions, sessionMemberIds(sessions), noRows, noAttention)[0]).toMatchObject({
+      id: parent.id,
+      runningSubagentCount: 1,
+    })
+  })
+
+  it('prefers the Host subagent activity over catalog and list-row evidence', () => {
+    const parent = {
+      ...summary('parent', 1),
+      subagentActivity: { running: 1, external: 2 },
+    }
+    // Local evidence names a different child; the Host fact is authoritative.
+    const staleChild = {
+      ...summary('stale', 2), parentId: parent.id, origin: 'subagent' as const, running: false,
+    }
+    const sessions = {
+      ...list(parent, staleChild),
+      projectionsBySession: { [parent.id]: catalog('stale') },
+    }
+    const [node] = deriveFlat(sessions, sessionMemberIds(sessions), noRows, noAttention)
+    expect(node).toMatchObject({
+      id: parent.id,
+      runningSubagentCount: 3,
+      externalSubagentCount: 2,
+    })
+    expect(deriveSearchResults(
+      sessions, [], 'parent', noArchive, 'default', noAttention, { items: [], hasMore: false }, 10,
+    ).items[0]).toMatchObject({ runningSubagentCount: 3, externalSubagentCount: 2 })
+    // A fact without external children reports no separate external count.
+    const localOnly = {
+      ...summary('local-only', 3),
+      subagentActivity: { running: 2, external: 0 },
+    }
+    expect(deriveFlat(list(localOnly), [localOnly.id], noRows, noAttention)[0]).toMatchObject({
+      runningSubagentCount: 2,
+    })
+    expect(deriveFlat(list(localOnly), [localOnly.id], noRows, noAttention)[0])
+      .not.toHaveProperty('externalSubagentCount')
+  })
+
   it('ignores fork lineage and sorts every ungrouped session as a top-level row', () => {
     const parent = summary('parent', 1)
     const oldChild = { ...summary('old-child', 10), parentId: parent.id }

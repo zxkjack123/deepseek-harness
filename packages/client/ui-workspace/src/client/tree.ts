@@ -50,8 +50,10 @@ export interface SessionNode {
   /** A Session-scoped UI consumer is awaiting this user. */
   pendingInteraction?: SessionPendingInteractionStatus
   running: boolean
-  /** Running direct children in the loaded subagent catalog. */
+  /** Active direct children: the Host fact when present, else the loaded catalog and child rows. */
   runningSubagentCount: number
+  /** Active external direct children inside {@link runningSubagentCount}; absent when none. */
+  externalSubagentCount?: number
   /** Finished running while not selected and not yet opened (the green "done" reminder dot). */
   completed: boolean
   /** In the registry-global pin set: leads its section, reorderable only among pinned rows. */
@@ -93,8 +95,10 @@ export interface SearchResultNode {
   /** A Session-scoped UI consumer is awaiting this user. */
   pendingInteraction?: SessionPendingInteractionStatus
   running: boolean
-  /** Running direct children in the loaded subagent catalog. */
+  /** Active direct children: the Host fact when present, else the loaded catalog and child rows. */
   runningSubagentCount: number
+  /** Active external direct children inside {@link runningSubagentCount}; absent when none. */
+  externalSubagentCount?: number
   /** Finished running while not selected and not yet opened (the green "done" reminder dot). */
   completed: boolean
   /** In the registry-global archive set: shown grayed and not openable. */
@@ -378,28 +382,65 @@ function visiblePendingKind(kind: string | undefined): SessionPendingInteraction
   }
 }
 
-function runningChildCount(list: SessionListState, parentId: SessionId, statuses: SessionStatuses): number {
-  return list.projectionsBySession[parentId]?.values.subagentCatalog?.reduce(
-    (count, child) => count + ((statuses.get(child.id)?.running ?? list.byId[child.id]?.running) === true ? 1 : 0),
-    0,
-  ) ?? 0
+/**
+ * Count running direct children per parent Session.
+ *
+ * The parent catalog is the direct-child authority, but it reaches the Client
+ * only through a projection store: a reconnect clears those stores, and a cold
+ * parent may never receive a current catalog cut. The child's own list row
+ * carries its durable parent id and live running state regardless, so both
+ * sources are unioned and deduplicated per parent. External children have no
+ * local Session row or list fact and stay uncounted.
+ * @param list - sessions list snapshot carrying catalogs and child rows.
+ * @param statuses - unified UI status by Session.
+ * @returns running direct-child counts by parent; an absent parent counts zero.
+ */
+function runningChildCounts(
+  list: SessionListState,
+  statuses: SessionStatuses,
+): Map<SessionId, number> {
+  const children = new Map<SessionId, Set<SessionId>>()
+  const add = (parentId: SessionId, childId: SessionId): void => {
+    const ids = children.get(parentId)
+    if (ids === undefined) children.set(parentId, new Set([childId]))
+    else ids.add(childId)
+  }
+  for (const [parentId, projection] of Object.entries(list.projectionsBySession)) {
+    for (const child of projection.values.subagentCatalog ?? []) add(parentId as SessionId, child.id)
+  }
+  for (const summary of Object.values(list.byId)) {
+    if (summary.origin === 'subagent' && summary.parentId !== undefined && summary.parentId !== summary.id) {
+      add(summary.parentId, summary.id)
+    }
+  }
+  const counts = new Map<SessionId, number>()
+  for (const [parentId, ids] of children) {
+    let count = 0
+    for (const id of ids) {
+      if ((statuses.get(id)?.running ?? list.byId[id]?.running) === true) count++
+    }
+    if (count > 0) counts.set(parentId, count)
+  }
+  return counts
 }
 
 function sessionNode(
   s: SessionSummary,
-  list: SessionListState,
+  runningChildren: ReadonlyMap<SessionId, number>,
   statuses: SessionStatuses,
   pinned: ReadonlySet<SessionId>,
   archived: ReadonlySet<SessionId>,
 ): SessionNode {
   const status = statuses.get(s.id)
   const pendingInteraction = visiblePendingKind(status?.pendingInteraction?.kind)
+  const activity = s.subagentActivity
   return {
     id: s.id,
     title: sessionTitle(s),
     blank: s.blank,
     running: status?.running ?? s.running,
-    runningSubagentCount: runningChildCount(list, s.id, statuses),
+    runningSubagentCount: activity === undefined ? runningChildren.get(s.id) ?? 0 : activity.running + activity.external,
+    ...(activity === undefined || activity.external === 0 ? {} : { externalSubagentCount: activity.external }),
     completed: status?.completionUnread === true,
     pinned: !archived.has(s.id) && pinned.has(s.id),
     archived: archived.has(s.id),
@@ -439,6 +480,7 @@ export function deriveGroups(
   const currentGroup = current === undefined
     ? undefined
     : owningGroupKey(workspaces, current)
+  const runningChildren = runningChildCounts(list, statuses)
   const groups: GroupNode[] = []
   for (const g of groupByWorkspace(list, workspaces, archived, rowState.archivedFilter, view.ungroupedOrder)) {
     const expanded = expandedGroups.has(g.key)
@@ -453,7 +495,7 @@ export function deriveGroups(
       containsCurrent: g.key === currentGroup,
       sessions: expanded
         ? sectionMembers(g.sessions, pinned, archived)
-          .map(session => sessionNode(session, list, statuses, pinned, archived))
+          .map(session => sessionNode(session, runningChildren, statuses, pinned, archived))
         : [],
     })
   }
@@ -507,6 +549,7 @@ export function deriveFlat(
   const archived = new Set(rowState.archivedSessionIds)
   const pinned = new Set(rowState.pinnedSessionIds)
   const current = mainSessionId(list)
+  const runningChildren = runningChildCounts(list, statuses)
   const members = sessionIds.flatMap((id) => {
     const session = list.byId[id]
     return session !== undefined && sessionVisible(session, current, archived, rowState.archivedFilter)
@@ -514,7 +557,7 @@ export function deriveFlat(
       : []
   })
   return sectionMembers(members, pinned, archived)
-    .map(session => sessionNode(session, list, statuses, pinned, archived))
+    .map(session => sessionNode(session, runningChildren, statuses, pinned, archived))
 }
 
 /**
@@ -545,6 +588,7 @@ export function deriveSearchResults(
   if (q === '') return { items: [], hasMore: false }
   const archived = new Set(archivedSessionIds)
   const current = mainSessionId(list)
+  const runningChildren = runningChildCounts(list, statuses)
 
   const workspaceBySession = new Map<SessionId, string>()
   for (const workspace of workspaces) {
@@ -595,12 +639,16 @@ export function deriveSearchResults(
       const match = contentBySession.get(summary.id)
       const status = statuses.get(summary.id)
       const pendingInteraction = visiblePendingKind(status?.pendingInteraction?.kind)
+      const activity = summary.subagentActivity
       return {
         id: summary.id,
         title: sessionTitle(summary),
         workspace: labelOf(summary),
         running: status?.running ?? summary.running,
-        runningSubagentCount: runningChildCount(list, summary.id, statuses),
+        runningSubagentCount: activity === undefined
+          ? runningChildren.get(summary.id) ?? 0
+          : activity.running + activity.external,
+        ...(activity === undefined || activity.external === 0 ? {} : { externalSubagentCount: activity.external }),
         ...(pendingInteraction === undefined
           ? {}
           : { pendingInteraction }),

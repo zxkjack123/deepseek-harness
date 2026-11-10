@@ -8,6 +8,7 @@ import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { ProjectionHandle, ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
+import type {} from '@deepseek-ai/dsh-subagent'
 import { SessionQueryError, type SessionRecord, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
@@ -17,12 +18,15 @@ import {
 } from './types.ts'
 import type {
   SessionListMetadata, SessionProjectionHints, SessionSearchItem,
-  SessionSearchValue, SessionSummary,
+  SessionSearchValue, SessionSummary, SubagentActivity,
 } from './types.ts'
 
 const SEARCH_PROVIDER_CALL_LIMIT = 100
 const SESSION_SEARCH_QUERY_MAX_CHARS = 500
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
+
+/** Default meaning "this caller did not resolve the Session's subagent activity". */
+const RESOLVE_SUBAGENT_ACTIVITY = Symbol('resolve subagent activity')
 
 const sessionListMetadataSchema: z.ZodType<SessionListMetadata> = z.object({
   blank: z.boolean(),
@@ -120,9 +124,27 @@ export class ApiSessionList {
    * the same key come from one cell; the handle read does not depend on any
    * other unit's view.
    * @param session - attached Session to summarize.
+   * @param activity - resolved live direct-child activity, `undefined` when the
+   *   caller resolved that there is none, or the default to resolve it here.
    * @returns current list metadata and available projections.
    */
-  summaryFor(session: Session): SessionSummary {
+  summaryFor(
+    session: Session,
+    activity: SubagentActivity | undefined | typeof RESOLVE_SUBAGENT_ACTIVITY = RESOLVE_SUBAGENT_ACTIVITY,
+  ): SessionSummary {
+    return this.summarize(
+      session,
+      activity === RESOLVE_SUBAGENT_ACTIVITY ? this.subagentActivityOf(session.id) : activity,
+    )
+  }
+
+  /**
+   * Build one summary from activity the caller already resolved.
+   * @param session - attached Session to summarize.
+   * @param activity - live direct-child activity, or undefined when there is none.
+   * @returns current list metadata and available projections.
+   */
+  private summarize(session: Session, activity: SubagentActivity | undefined): SessionSummary {
     const metadata = this.listMetadata.stateOf(session)
     const projections = this.projectionsFor(session.header, session)
     return {
@@ -133,8 +155,53 @@ export class ApiSessionList {
       running: this.ctx.agents.get(session.id)?.status === 'running',
       blank: metadata.blank,
       ...listFields(session.header),
+      ...(activity === undefined ? {} : { subagentActivity: activity }),
       ...(projections === undefined ? {} : { projections }),
     }
+  }
+
+  /**
+   * Resolve one parent's live direct-child activity.
+   *
+   * Direct children are Sessions whose own header names the parent, so a cold
+   * parent still receives the count without opening any child. Running comes
+   * from the Agent registry; external executions own no Session and come from
+   * the optional Subagent service.
+   * @param parentId - Session whose children are counted.
+   * @returns the activity, or undefined when no direct child is active.
+   */
+  private subagentActivityOf(parentId: SessionId): SubagentActivity | undefined {
+    let running = 0
+    for (const session of this.ctx.sessions.list()) {
+      const header = session.header
+      if (header.parentSession !== parentId || header.origin !== 'subagent') continue
+      if (this.ctx.agents.get(session.id)?.status === 'running') running++
+    }
+    const external = this.ctx.get('subagents')?.externalChildCounts().get(parentId) ?? 0
+    return running === 0 && external === 0 ? undefined : { running, external }
+  }
+
+  /**
+   * Resolve every parent's live direct-child activity in one pass.
+   * @returns activity keyed by parent; parents without active children are absent.
+   */
+  private subagentActivityByParent(): Map<SessionId, SubagentActivity> {
+    const running = new Map<SessionId, number>()
+    for (const session of this.ctx.sessions.list()) {
+      const header = session.header
+      const parentId = header.parentSession
+      if (parentId === undefined || header.origin !== 'subagent') continue
+      if (this.ctx.agents.get(session.id)?.status !== 'running') continue
+      running.set(parentId, (running.get(parentId) ?? 0) + 1)
+    }
+    const activity = new Map<SessionId, SubagentActivity>()
+    for (const [parentId, count] of running) activity.set(parentId, { running: count, external: 0 })
+    for (const [parentId, count] of this.ctx.get('subagents')?.externalChildCounts() ?? []) {
+      if (count === 0) continue
+      const current = activity.get(parentId)
+      activity.set(parentId, { running: current?.running ?? 0, external: count })
+    }
+    return activity
   }
 
   /**
@@ -146,6 +213,7 @@ export class ApiSessionList {
     signal?.throwIfAborted()
     const records = await this.ctx.sessionQuery.listSessions(signal)
     signal?.throwIfAborted()
+    const activity = this.subagentActivityByParent()
     const items: SessionSummary[] = []
     const cold: SessionRecord[] = []
     let yieldDeadline = performance.now() + this.workSliceMs
@@ -153,7 +221,7 @@ export class ApiSessionList {
       signal?.throwIfAborted()
       const live = this.ctx.sessions.get(record.header.id)
       if (live !== undefined) {
-        items.push(this.summaryFor(live))
+        items.push(this.summaryFor(live, activity.get(live.id)))
       } else if (record.header.cwd !== undefined) {
         cold.push(record)
       }
@@ -165,7 +233,7 @@ export class ApiSessionList {
     }
     for (const record of cold) {
       signal?.throwIfAborted()
-      items.push(this.summarizeCold(record))
+      items.push(this.summarizeCold(record, activity.get(record.header.id)))
       if (performance.now() >= yieldDeadline) {
         await scheduler.yield()
         signal?.throwIfAborted()
@@ -177,7 +245,10 @@ export class ApiSessionList {
     return items
   }
 
-  private summarizeCold({ header, formatStatus }: SessionRecord): SessionSummary {
+  private summarizeCold(
+    { header, formatStatus }: SessionRecord,
+    activity: SubagentActivity | undefined,
+  ): SessionSummary {
     const projections = this.projectionsFor(header, undefined)
     const metadata = projections?.values.sessionListMetadata
     return {
@@ -189,6 +260,7 @@ export class ApiSessionList {
       // A large, metadata-less, or inaccessible cache miss remains unknown and visible.
       blank: metadata?.blank ?? false,
       ...listFields(header),
+      ...(activity === undefined ? {} : { subagentActivity: activity }),
       ...(projections === undefined ? {} : { projections }),
     }
   }

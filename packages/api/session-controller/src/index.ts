@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-file-upload'
 import { canOpenNativePath, nativeFileManager, nativeFileApplications, openNativeFileApplication, openNativeAssociatedPath, revealNativePath } from '@deepseek-ai/dsh-native-command'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
+import type {} from '@deepseek-ai/dsh-subagent'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { Remote, RemoteError, TypertRemoteService, principalOf, type TypertResourceResolveInput } from '@deepseek-ai/dsh-typert-protocol'
 import { canonicalClientTimeZone } from '@deepseek-ai/dsh-util-time'
@@ -232,11 +233,22 @@ export class SessionController extends TypertRemoteService {
         ctx.emit('api-session/added', this.listState.summaryFor(agent.session))
       }
     }
+    // A child's activity belongs to its direct creator's list row, which is
+    // republished whenever the count can change. An unattached parent keeps its
+    // previous row until the next list read.
+    const publishSubagentActivity = (parentId: SessionId): void => {
+      const parent = ctx.sessions.get(parentId)
+      if (parent !== undefined) ctx.emit('api-session/added', this.listState.summaryFor(parent))
+    }
     ctx.on('agent/created', publishAgentAvailability)
     ctx.on('agent/disposed', publishAgentAvailability)
     ctx.on('agent/status', ({ agent, status }) => {
       ctx.emit('api-session/status', agent.id, status === 'running')
+      const { origin, parentSession } = agent.session.header
+      if (origin === 'subagent' && parentSession !== undefined) publishSubagentActivity(parentSession)
     })
+    ctx.on('subagent/start', ({ parentSessionId }) => { publishSubagentActivity(parentSessionId) }, { global: true })
+    ctx.on('subagent/end', ({ parentSessionId }) => { publishSubagentActivity(parentSessionId) }, { global: true })
     ctx.on('agent/error', ({ agent, error }) => {
       ctx.emit('api-session/error', agent.id, errorChain(error))
     })

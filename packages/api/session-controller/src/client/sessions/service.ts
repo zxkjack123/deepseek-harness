@@ -5,6 +5,7 @@ import { SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
 import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import { SESSION_SEARCH_RESULT_LIMIT } from '../../types.ts'
+import type { SubagentActivity } from '../../types.ts'
 import type { SessionProjectionSummaryValues } from '@deepseek-ai/dsh-session-projection/types'
 import {
   createSnapshotStore, notifySubscribers, type ObservableSnapshot, type SnapshotStore,
@@ -40,6 +41,8 @@ export interface SessionSummary {
   running: boolean
   /** Local ownership counts; Host metadata refreshes cannot overwrite them. */
   readonly retainedBy: SessionRetainInfo['retainedBy']
+  /** Live direct-child activity the Host reported; absent when there is none or it is unknown. */
+  readonly subagentActivity?: SubagentActivity
   /**
    * New Session presentation and reuse eligibility, derived from the Host
    * summary, `sessionListMetadata`, and client acceptance/running observations.
@@ -652,6 +655,7 @@ export class ClientSessions implements ISessions {
         blank: entry.blank,
         updatedAt: entry.updatedAt,
         formatStatus: entry.formatStatus,
+        ...(entry.subagentActivity === undefined ? {} : { subagentActivity: entry.subagentActivity }),
         ...(entry.projectionValues === undefined
           ? {}
           : { projectionValues: entry.projectionValues }),

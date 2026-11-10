@@ -150,6 +150,21 @@ export type QueueAction =
   | { readonly kind: 'remove' }
   | { readonly kind: 'steer' }
 
+/**
+ * Live direct-subagent activity a Session's own list row reports.
+ *
+ * Direct children only: work a child delegates belongs to that child's row.
+ * `waiting` is absent because no direct child can hold a user interaction — a
+ * subagent's question call is rejected and an approval wait keeps its Agent
+ * running, which `running` already covers.
+ */
+export interface SubagentActivity {
+  /** Direct children whose live Agent is running. */
+  readonly running: number
+  /** Active external executions, which own no local Session. */
+  readonly external: number
+}
+
 /** One Session list entry. */
 export interface SessionSummary {
   /** Whether this Session currently owns a live Agent. */
@@ -163,6 +178,8 @@ export interface SessionSummary {
   readonly parentSessionId?: SessionId
   readonly origin?: 'subagent'
   readonly cwd?: string
+  /** Live direct-child activity; absent when the Session has none. */
+  readonly subagentActivity?: SubagentActivity
   readonly projections?: SessionProjectionHints
 }
 
