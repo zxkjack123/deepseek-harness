@@ -16,6 +16,13 @@ export interface ConnectionRecoveryConfig {
   generationReadyWarnMs?: number
   /** Deadline in ms for readiness, including physical connection setup. Default: 15000. */
   generationReadyTimeoutMs?: number
+  /**
+   * Hidden duration in ms after which the next visible page re-handshakes instead
+   * of trusting the suspended socket. A desktop tab switch shorter than this
+   * keeps its generation, so streaming is not interrupted by ordinary focus
+   * changes. Default: 5000.
+   */
+  resumeReconnectAfterMs?: number
 }
 
 // Browsers and Node share this maximum signed 32-bit timer delay.
@@ -28,6 +35,7 @@ export const ConnectionRecoveryConfigSchema: z<ConnectionRecoveryConfig> = z.obj
   backoffMaxMs: z.natural().min(1).max(MAX_TIMER_MS).default(10_000),
   generationReadyWarnMs: z.natural().min(1).max(MAX_TIMER_MS).default(3_000),
   generationReadyTimeoutMs: z.natural().min(1).max(MAX_TIMER_MS).default(15_000),
+  resumeReconnectAfterMs: z.natural().max(MAX_TIMER_MS).default(5_000),
 })
 
 /**
