@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-11-10-session-list-subagent-activity.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-11-10-session-list-subagent-activity.md
+/agent-note-session-lists-report-live-direct-subagent-activity-from-the-host:
+  en: 2dbe841f9bce7c8f
+  zh: 88313997892a2961
+/agent-note-session-lists-report-live-direct-subagent-activity-from-the-host/problem:
+  en: 3f577cb43cddeddb
+  zh: 6c006b42f316f3f4
+/agent-note-session-lists-report-live-direct-subagent-activity-from-the-host/decision:
+  en: ded86c7f43cb04c5
+  zh: e729b43bc660a6e4
+/agent-note-session-lists-report-live-direct-subagent-activity-from-the-host/alternatives-considered:
+  en: 9508a051c9e12467
+  zh: 5495d8531f1d31b3
+/agent-note-session-lists-report-live-direct-subagent-activity-from-the-host/consequences:
+  en: 816881423975e5d7
+  zh: 28653ef2f090491b

@@ -314,6 +314,16 @@ export class SubagentRuntime extends TypertRemoteService {
   }
 
   /**
+   * Count active external executions by their durable direct creator.
+   * External runs own no local Session, so a Session list row cannot learn
+   * about them from Session headers alone.
+   * @returns direct-creator Session id → active external execution count.
+   */
+  externalChildCounts(): ReadonlyMap<SessionId, number> {
+    return this.manager?.externalChildCounts() ?? new Map<SessionId, number>()
+  }
+
+  /**
    * Resolve a model-supplied agent reference within the caller's tree. `lead`
    * selects the root and a slash-separated path is looked up through the
    * catalogs along it. Any other text that is not a name in the tree is

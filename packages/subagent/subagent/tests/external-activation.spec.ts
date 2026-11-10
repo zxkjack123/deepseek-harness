@@ -52,6 +52,19 @@ const completed: SubagentResult = {
 }
 
 describe('external subagent activations', () => {
+  it('counts an active external execution by its direct creator until it ends', async () => {
+    const backend = execution()
+    backend.cleanup.resolve(undefined)
+    const fixture = await setup(async () => backend.run)
+    const activation = await fixture.start()
+
+    expect([...fixture.ctx.subagents.externalChildCounts()]).toEqual([[fixture.parent.id, 1]])
+
+    backend.result.resolve(completed)
+    await activation.dispose()
+    expect([...fixture.ctx.subagents.externalChildCounts()]).toEqual([])
+  })
+
   it('keeps startup cancellation attached until unpublished resources finish cleanup', async () => {
     const entered = Promise.withResolvers<AbortSignal>()
     const cancelled = Promise.withResolvers<undefined>()

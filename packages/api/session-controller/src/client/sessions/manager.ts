@@ -807,8 +807,11 @@ function applyMutation(summaries: readonly SessionSummary[], mutation: SessionLi
     case 'placeholder': {
       const existing = summaries.find(summary => summary.sessionId === mutation.summary.sessionId)
       if (existing === undefined) return [mutation.summary, ...summaries]
+      // Activity is Host-owned per summary: an upsert without it means the
+      // Session has no active child now, so a previous count must not survive.
+      const { subagentActivity: previousActivity, ...rest } = existing
       const filled: SessionSummary = {
-        ...existing,
+        ...rest,
         // Blank only lowers: a stale true (session-added racing the local
         // first send) never re-hides an already-surfaced session.
         blank: existing.blank && mutation.summary.blank,
@@ -816,7 +819,10 @@ function applyMutation(summaries: readonly SessionSummary[], mutation: SessionLi
           agentAvailable: mutation.summary.agentAvailable,
           running: mutation.summary.running,
           ...(mutation.summary.formatStatus === undefined ? {} : { formatStatus: mutation.summary.formatStatus }),
-        } : {}),
+          ...(mutation.summary.subagentActivity === undefined
+            ? {}
+            : { subagentActivity: mutation.summary.subagentActivity }),
+        } : previousActivity === undefined ? {} : { subagentActivity: previousActivity }),
         ...(existing.cwd === undefined && mutation.summary.cwd !== undefined ? { cwd: mutation.summary.cwd } : {}),
         ...(existing.parentSessionId === undefined && mutation.summary.parentSessionId !== undefined
           ? { parentSessionId: mutation.summary.parentSessionId } : {}),
@@ -827,6 +833,7 @@ function applyMutation(summaries: readonly SessionSummary[], mutation: SessionLi
         && filled.origin === existing.origin && filled.blank === existing.blank
         && filled.agentAvailable === existing.agentAvailable && filled.running === existing.running
         && filled.formatStatus === existing.formatStatus
+        && filled.subagentActivity === existing.subagentActivity
       ) return [...summaries]
       return summaries.map(summary => summary.sessionId === mutation.summary.sessionId ? filled : summary)
     }

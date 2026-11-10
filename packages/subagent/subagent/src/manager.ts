@@ -181,6 +181,24 @@ export class SubagentManager {
   }
 
   /**
+   * Count active external executions by their durable direct creator.
+   * External runs own no local Session, so this registry is the only Host
+   * source for their activity. A run counts once its backend started and stops
+   * counting when teardown begins.
+   * @returns direct-creator Session id → active external execution count.
+   */
+  externalChildCounts(): Map<SessionId, number> {
+    const counts = new Map<SessionId, number>()
+    for (const activation of this.resident.values()) {
+      if (activation.kind !== 'external' || !activation.accepted || activation.closing !== undefined) continue
+      const parentId = activation.ancestors.at(-1)
+      if (parentId === undefined) continue
+      counts.set(parentId, (counts.get(parentId) ?? 0) + 1)
+    }
+    return counts
+  }
+
+  /**
    * Interrupt one live continuable child's current turn under the supplied authority.
    * @param targetSessionId - the durable child session id to interrupt.
    * @param authority - a trusted user operation or exact live ancestor Agent.

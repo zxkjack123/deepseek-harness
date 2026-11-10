@@ -3,7 +3,9 @@ import { contextMenuHook } from '@deepseek-ai/dsh-client-test-runtime'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentProps } from 'react'
+import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { allowAllAccess, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
@@ -14,6 +16,7 @@ import type { RowDragProps } from '../src/client/rows/Rows.tsx'
 import {
   ProjectRowItem as ProjectRowItemComponent, SearchResultItem, SessionNodeItem as SessionNodeItemComponent,
 } from '../src/client/rows/Rows.tsx'
+import { deriveFlat, sessionMemberIds } from '../src/client/tree.ts'
 import type { GroupNode, SearchResultNode, SessionNode } from '../src/client/tree.ts'
 import { en, zh } from '../src/client/locales.ts'
 import rowCss from '../src/client/rows/Rows.module.css'
@@ -588,6 +591,59 @@ describe('workspace browser rows', () => {
     const delegated = renderRow({ completed: true, runningSubagentCount: 1 })
     expect(delegated.container.querySelector('[data-state="ongoing"]')).not.toBeNull()
     expect(delegated.container.querySelector('[data-state="done"]')).toBeNull()
+  })
+
+  it('keeps a completed row ongoing while only the child list row proves it runs', () => {
+    const list: SessionListState = {
+      ids: [sid('parent'), sid('child')],
+      byId: {
+        [sid('parent')]: {
+          id: sid('parent'), title: 'Parent', displayTitle: 'Parent', running: false,
+          blank: false, updatedAt: 1, retainedBy: {},
+        },
+        [sid('child')]: {
+          id: sid('child'), title: 'Child', displayTitle: 'Child', running: true,
+          blank: false, updatedAt: 0, retainedBy: {}, parentId: sid('parent'), origin: 'subagent',
+        },
+      },
+      phase: 'ready',
+      projectionsBySession: {},
+    }
+    const statuses: SessionStatusSnapshot = new Map([
+      [sid('parent'), { running: false, pendingInteraction: undefined, completionUnread: true }],
+    ])
+    const node = deriveFlat(list, sessionMemberIds(list), {
+      pinnedSessionIds: [], archivedSessionIds: [], archivedFilter: 'default' as const,
+    }, statuses)[0]!
+    const { container } = render(
+      <SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()} t={t} />,
+    )
+    expect(container.querySelector('[data-state="ongoing"]')).not.toBeNull()
+    expect(container.querySelector('[data-state="done"]')).toBeNull()
+  })
+
+  it('names external-only descendant activity and keeps the row ongoing', () => {
+    const node: SessionNode = {
+      id: sid('owner'), title: 'Delegating', blank: false, running: false,
+      runningSubagentCount: 1, externalSubagentCount: 1, completed: true,
+      updatedAt: 0, pinned: false, archived: false,
+    }
+    render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()} t={t} />)
+    const row = screen.getByRole('treeitem')
+    expect(row.querySelector('[data-state="ongoing"]')).not.toBeNull()
+    expect(row.querySelector('[data-state="done"]')).toBeNull()
+    expect(screen.getByText('1 个外部子智能体运行中')).toBeTruthy()
+  })
+
+  it('keeps the ordinary subagent label while local and external children run together', () => {
+    const node: SessionNode = {
+      id: sid('owner'), title: 'Delegating', blank: false, running: false,
+      runningSubagentCount: 2, externalSubagentCount: 1, completed: false,
+      updatedAt: 0, pinned: false, archived: false,
+    }
+    render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()} t={t} />)
+    expect(screen.getByText('2 个子智能体运行中')).toBeTruthy()
+    expect(screen.queryByText('2 个外部子智能体运行中')).toBeNull()
   })
 
   it('shows descendant activity without describing an idle parent as running', () => {
