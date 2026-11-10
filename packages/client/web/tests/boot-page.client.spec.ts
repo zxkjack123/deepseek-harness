@@ -58,4 +58,16 @@ describe('BootPage', () => {
     page.dispose()
     expect(el.childNodes).toHaveLength(0)
   })
+
+  it('offers a reload for the failure report, which a standalone window has no chrome for', () => {
+    let reloads = 0
+    const el = document.createElement('div')
+    document.body.append(el)
+    const page = new BootPage(el, () => { reloads += 1 })
+    page.fail('web boot: 1 entry did not activate')
+    const retry = el.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+    expect(retry?.textContent).toBe('Reload')
+    retry?.click()
+    expect(reloads).toBe(1)
+  })
 })

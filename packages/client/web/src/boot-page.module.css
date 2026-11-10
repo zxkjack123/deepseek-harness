@@ -101,3 +101,24 @@
   color: var(--dsw-alias-label-secondary, var(--dsh-boot-label-secondary));
   white-space: pre-wrap;
 }
+
+.retry {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 6px 14px;
+  border: 0.5px solid var(--dsw-alias-border-l2, var(--dsh-boot-border));
+  border-radius: 999px;
+  corner-shape: round;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary, var(--dsh-boot-label-primary));
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .retry:hover {
+    background: var(--dsw-alias-bg-l2, rgb(0 0 0 / 4%));
+  }
+}
