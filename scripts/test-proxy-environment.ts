@@ -23,8 +23,6 @@
  * @module
  */
 
-import { globSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { PROXY_ENV_NAMES } from '../packages/util/http-proxy/src/policy.ts'
 
 /** The flag a Node process reads before honoring the names above; ambient in the same way. */
@@ -38,9 +36,15 @@ export const TEST_PROXY_SETUP_FILE = './scripts/test-proxy-environment.ts'
  * no `setupFiles` today, and a hand-written list would let one of them gain a setup without gaining
  * this one. The wiring test asserts only over the configurations that declare a setup at all.
  *
+ * The built-ins are read at call time because this module is itself a `setupFiles` entry: a jsdom
+ * suite loads it with browser resolve conditions, where a static `node:` import resolves to a stub
+ * that throws on access and takes the whole suite down.
+ *
  * @returns repository-relative config paths, sorted.
  */
 export function vitestConfigFiles(): string[] {
+  const { globSync } = process.getBuiltinModule('node:fs')
+  const { resolve } = process.getBuiltinModule('node:path')
   return globSync('vitest*.ts', { cwd: resolve(import.meta.dirname, '..') }).sort()
 }
 
