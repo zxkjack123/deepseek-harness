@@ -54,6 +54,12 @@ Set `maxActiveSubagents` on the host plugin to limit live and materializing chil
 
 The current `maxActiveSubagents` value is sampled before every new or cold-resumed Activation. Raising it admits more children in existing trees; lowering it leaves resident children running and refuses further admissions until usage is below the limit.
 
+### Run deadline
+
+Set `childRunDeadlineMs` on the host plugin to bound one child run in wall-clock milliseconds. It defaults to `0`, which leaves the run unbounded. The deadline is armed when an activation is accepted, applies to local and external children alike, and is cleared when the activation closes. On expiry the manager records `Stopped after the <N> ms subagent run deadline elapsed.` as the result diagnostic, cancels the child, and closes the activation, so the parent notice reads `was stopped before it finished.` A local child stopped this way reports `aborted`, including one that never reached a turn ending of its own.
+
+The deadline cancels cooperatively: it takes the same cancel-and-dispose path as an interrupt, so a tool that ignores cancellation delays settlement. The armed timer does not keep the host process alive.
+
 At capacity, creation or cold resume rejects with `ACTIVATION_LIMIT_REACHED` (browser prompts receive `subagent/delivery-unavailable`): wait for a child to finish or continue using the existing agents. Admission does not queue, because a parent waiting for descendants must not wait for its own occupied slot. Slots are process-local and do not constrain cumulative Session history or token usage.
 
 ### Local and external children
@@ -174,7 +180,7 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-Parent delivery sends a user-role status notice to the resident direct parent in the same tree, including an idle parent. It does not restore an offline parent. Its opening line names the child by its full name, such as `Background subagent reviewer finished and will do no further work unless you send it more.` The notice contains the child’s nonempty final text blocks. When the child's last action before that text was a message to its parent, with no input claimed and no tool call logged after it, the notice replaces them with `It sent you a message just before finishing, so its closing message is omitted.`; the parent recovers omitted closing text only by messaging the child again. External notices also state that further messages are unsupported. Reasoning and other nontext blocks are excluded. Every parent notice includes available structured output as `Structured result: <JSON>` and the provider’s safe diagnostic as a separate text block. Empty closing text is reported as `It left no closing message.` Caller delivery emits no notice; SDK lifecycle notifications retain complete child output when cleanup succeeds.
+Parent delivery sends a user-role status notice to the resident direct parent in the same tree, including an idle parent. It does not restore an offline parent. Its opening line names the child by its full name, such as `Background subagent reviewer finished and will do no further work unless you send it more.` The notice contains the child’s nonempty final text blocks. When the child's last action before that text was a message to its parent, with no input claimed and no tool call logged after it, the notice replaces them with `It sent you a message just before finishing, so its closing message is omitted.`; the parent recovers omitted closing text only by messaging the child again. External notices also state that further messages are unsupported. Reasoning and other nontext blocks are excluded. Every parent notice includes available structured output as `Structured result: <JSON>` and any safe diagnostic as a separate text block. An external backend authors that text; a local child's failure supplies its harness code and message chain, such as `CONTEXT_WINDOW_EXCEEDED: …`, which is how the parent tells an exhausted context window from a dead backend. Empty closing text is reported as `It left no closing message.` Caller delivery emits no notice; SDK lifecycle notifications retain complete child output when cleanup succeeds.
 
 #### Token effect
 
@@ -239,6 +245,7 @@ These limits define when the seam is a poor fit or needs special operational car
 - **Pending injected context retains an Activation** — settlement conservatively treats every Inbox occurrence as unfinished. Context parked after the Agent becomes idle keeps the child and its live ancestors resident until a waking delivery claims it, a queue mutation removes it, or manager teardown discards it. Host completion joins active work, pending child creation, and resource cleanup, but does not wait for a subtree containing only idle parked inboxes; it neither completes those activation results nor discards their messages.
 - **Process-local residency** — the Activation inbox and ownership graph do not coordinate two harness processes; concurrent access to one persistence store needs a durable mailbox and cross-process lease protocol.
 - **No replay of accepted-but-unlogged messages** — a crash can lose an accepted prompt that never reached the child's session log; the lost message is not replayed automatically.
+- **Deadlines cancel cooperatively** — `childRunDeadlineMs` stops a child that ignores cancellation only as fast as that child yields. It guarantees a stop reason and a diagnostic, not a hard kill.
 - **Lifecycle events are observe-only** — a run-affecting `subagent/end` continuation or decision API waits for a concrete consumer.
 
 <a id="dev-note"></a>

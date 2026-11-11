@@ -6,6 +6,7 @@ import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { finalAssistantOutput } from './assistant-output.ts'
+import { describeSubagentFailure } from './diagnostic.ts'
 import { epochStopReason } from './lifecycle.ts'
 import { SubagentError } from './error.ts'
 import type { StructuredAttachment } from './structured.ts'
@@ -63,6 +64,13 @@ interface ActivationBase {
    * settlement notice, even if this epoch's start event was already published.
    */
   accepted: boolean
+  /**
+   * Failure detail the manager fixed itself — a run deadline — for the parent's
+   * settlement notice. Overrides nothing a running child reports.
+   */
+  stopDetail: string | undefined
+  /** Armed run deadline for this epoch; closing the epoch disarms it. */
+  deadline: { dispose: () => void } | undefined
 }
 
 /** Resources retained only for the selected execution kind. */
@@ -74,6 +82,13 @@ export type ActivationResource =
     readonly structured: StructuredAttachment | undefined
     /** Latest live failure not superseded by a later committed turn ending. */
     failureAt: SessionLogOffset | undefined
+    /**
+     * Parent-visible detail of that failure. The parent otherwise learns only
+     * that the child failed, not whether its context ran out or its backend died.
+     */
+    failureDetail: string | undefined
+    /** Stop reason the manager fixed after stopping this child, such as a deadline. */
+    stopOverride: SubagentResult['stopReason'] | undefined
     /** Renewed when local settlement must recheck input. */
     poke: PromiseWithResolvers<void>
     /**
@@ -127,9 +142,10 @@ export function requireLocalActivation(activation: Activation): LocalActivation 
  */
 export function observeLocalFailure(activation: LocalActivation, wake: () => void): void {
   const child = activation.handle.agent
-  child.ctx.on('agent/error', ({ agent }) => {
+  child.ctx.on('agent/error', ({ agent, error }) => {
     if (agent !== child) return
     activation.failureAt = child.session.seq
+    activation.failureDetail = describeSubagentFailure(error)
     wake()
   })
   child.ctx.on('session/event', (session, event) => {
@@ -149,14 +165,19 @@ export function captureLocalResult(activation: LocalActivation): SubagentResult 
   // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   const events = activation.handle.agent.session.snapshotEvents(activation.outputStart)
   const output = finalAssistantOutput(events) ?? []
-  const stopReason = activation.failureAt === undefined ? epochStopReason(events) : 'error'
+  const stopReason = activation.stopOverride
+    ?? (activation.failureAt === undefined ? epochStopReason(events) : 'error')
+  // The detail survives a committed turn ending, because that ending is often the
+  // failure's own record; only a completed epoch must not carry it.
+  const detail = stopReason === 'completed' ? undefined : activation.failureDetail
+  const diagnostic = detail === undefined ? {} : { diagnostic: detail }
   const structured = activation.structured
   if (structured !== undefined) {
     const captured = structured.captured()
-    if (captured !== undefined) return { output, stopReason, structured: captured.value }
-    if (stopReason === 'completed') return { output, stopReason: 'error' }
+    if (captured !== undefined) return { output, stopReason, structured: captured.value, ...diagnostic }
+    if (stopReason === 'completed') return { output, stopReason: 'error', ...diagnostic }
   }
-  return { output, stopReason }
+  return { output, stopReason, ...diagnostic }
 }
 
 /** Serialize each durable child's delivery, release, and disposal. */

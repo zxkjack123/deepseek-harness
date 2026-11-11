@@ -18,7 +18,14 @@ import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import * as SubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 import type { ContentBlock, GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import {
+  ToolCallId,
+  createUserMessage,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  HarnessError,
+  LlmAdapter,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import SubagentRuntime, {
@@ -83,7 +90,12 @@ afterEach(async () => {
 /** Boot the full continuable stack: loop, persistence, providers, and subagents. */
 async function setupWith(
   adapter: LlmAdapter,
-  options: { persistence?: boolean; sessionQuery?: boolean; maxActiveSubagents?: number } = {},
+  options: {
+    persistence?: boolean
+    sessionQuery?: boolean
+    maxActiveSubagents?: number
+    childRunDeadlineMs?: number
+  } = {},
 ) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
@@ -103,8 +115,10 @@ async function setupWith(
   if (options.sessionQuery !== false) await ctx.plugin(TestSessionQuery)
   await mountWorkingDirectoryFixture(ctx)
   if (ctx.get('sessionProjections') === undefined) await ctx.plugin(SessionProjectionRegistry)
-  subagentConfigs.set(ctx, await liveConfig(ctx, SubagentRuntime,
-    options.maxActiveSubagents === undefined ? {} : { maxActiveSubagents: options.maxActiveSubagents }))
+  const subagentConfig: Record<string, number> = {}
+  if (options.maxActiveSubagents !== undefined) subagentConfig.maxActiveSubagents = options.maxActiveSubagents
+  if (options.childRunDeadlineMs !== undefined) subagentConfig.childRunDeadlineMs = options.childRunDeadlineMs
+  subagentConfigs.set(ctx, await liveConfig(ctx, SubagentRuntime, subagentConfig))
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   await ctx.plugin(SubagentFork, { providerName: 'fork' })
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -3170,9 +3184,56 @@ describe('continuable settlement delivery', () => {
     // waiting on was claimed out of the inbox and then swallowed by the failure.
     const child = await loadStoredSession(ctx.sessionPersistence, started.childId)
     expect(hasUserText(child.events, 'second task')).toBe(false)
+    // The failure detail follows the closing text: without it the parent cannot
+    // tell a full disk from an exhausted context window or a dead backend.
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.name} failed before it finished.\nIts closing message:\nthe answer`,
+      `Background subagent ${started.name} failed before it finished.\nIts closing message:\nthe answer`
+      + '\nENOSPC: no space left on device',
     )
+  })
+
+  it('names the machine code of the failure so the parent can choose a remedy', async () => {
+    const releaseFirst = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('the answer'), gate: releaseFirst.promise },
+      { chunks: textResponse('parent ack') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    ctx.on('agent/pre-step', async ({ agent: subject, turn }, next) => {
+      if (subject.session.header.parentSession === undefined || turn < 2) return next()
+      throw new HarnessError('prompt is 12 tokens over the 128000 token window', CONTEXT_WINDOW_EXCEEDED_CODE)
+    })
+
+    const started = await ctx.subagents.startActivation({ ...startSpec(parent), delivery: 'parent' })
+    await queuePrompt(ctx, started.childId, message('second task'))
+    releaseFirst.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    // Re-routing the same prompt would fail the same way: only the code lets the
+    // parent tell "shrink the task" apart from "try another model".
+    expect(settlementNotices(parent)[0]!.text).toBe(
+      `Background subagent ${started.name} failed before it finished.\nIts closing message:\nthe answer`
+      + `\n${CONTEXT_WINDOW_EXCEEDED_CODE}: prompt is 12 tokens over the 128000 token window`,
+    )
+  })
+
+  it('stops a child that outlives its configured run deadline', async () => {
+    const releaseGate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('too late'), gate: releaseGate.promise }])
+    const { ctx, parent } = await setupWith(adapter, { childRunDeadlineMs: 10 })
+
+    const started = await ctx.subagents.startActivation({ ...startSpec(parent), delivery: 'parent' })
+    // The model call never returns on its own, so only the deadline can end it.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    releaseGate.resolve(undefined)
+
+    const result = await started.result
+    expect(result.stopReason).toBe('aborted')
+    expect(result.diagnostic).toBe('Stopped after the 10 ms subagent run deadline elapsed.')
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain('was stopped before it finished.')
+    expect(settlementNotices(parent)[0]!.text).toContain('Stopped after the 10 ms subagent run deadline elapsed.')
   })
 
   it('reports accepted work cut short before its first step as stopped', async () => {

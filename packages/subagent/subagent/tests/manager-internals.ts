@@ -49,12 +49,16 @@ export function bindSubagentActivation(
     outputStart: child.session.seq,
     structured: undefined,
     failureAt: undefined,
+    failureDetail: undefined,
+    stopOverride: undefined,
     poke: Promise.withResolvers(),
     omitClosingText: false,
     delivery: 'caller',
     result,
     closing: undefined,
     accepted: false,
+    stopDetail: undefined,
+    deadline: undefined,
   }
   resident.set(child.id, activation)
   child.ctx.effect(() => () => {

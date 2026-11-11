@@ -54,6 +54,12 @@ kind: "package-reference"
 
 每次新建或冷恢复 Activation 前都会读取当前 `maxActiveSubagents`。调高后已有树可接纳更多子代理；调低后驻留子代理继续运行，使用量降至上限以下前拒绝新接纳。
 
+### 运行期限
+
+在 Host 插件上设置 `childRunDeadlineMs`，为一次子级运行设定墙钟毫秒上限。默认值 `0` 表示不设限。期限在 activation 被接受时开始计时，对本地和外部子级同样生效，并在 activation 关闭时清除。到期后，管理器把 `Stopped after the <N> ms subagent run deadline elapsed.` 记录为结果诊断、取消子级并关闭 activation，父级通知因此显示 `was stopped before it finished.`。以这种方式停止的本地子级报告 `aborted`，即便它自身从未到达轮次结束。
+
+期限采用协作式取消：它走与中断相同的取消并释放路径，因此忽略取消的工具会推迟结算。已装载的计时器本身不会让宿主进程保持存活。
+
 容量耗尽时，新建或冷恢复以 `ACTIVATION_LIMIT_REACHED` 拒绝（浏览器消息返回 `subagent/delivery-unavailable`）：等待子代理完成，或继续使用现有代理。接纳不会排队，避免等待后代的父代理又等待自己占用的名额。名额仅存在于当前进程，不限制累计 Session 历史或 token 用量。
 
 ### 本地与外部子级
@@ -174,7 +180,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-父级投递向同树中驻留的直接父级发送 user-role 状态通知，包括空闲父级。它不会恢复离线父级。首行使用子级的完整名称，例如 `Background subagent reviewer finished and will do no further work unless you send it more.`。通知包含子级最终输出中的非空文本块。若子级在该文本之前的最后一个动作是向父级发送消息，且此后既未领取输入也未记录任何工具调用，通知会以 `It sent you a message just before finishing, so its closing message is omitted.` 替代这些文本块；父级只有再次向子级发送消息才能取回被省略的收尾文本。外部通知还说明不支持后续消息。推理及其他非文本块被排除。每条父级通知都会以 `Structured result: <JSON>` 附带可用的结构化输出，并以独立文本块附带提供方安全诊断。收尾文本为空时，通知使用 `It left no closing message.`。调用方投递不发送通知；清理成功时 SDK 生命周期通知保留完整子级输出。
+父级投递向同树中驻留的直接父级发送 user-role 状态通知，包括空闲父级。它不会恢复离线父级。首行使用子级的完整名称，例如 `Background subagent reviewer finished and will do no further work unless you send it more.`。通知包含子级最终输出中的非空文本块。若子级在该文本之前的最后一个动作是向父级发送消息，且此后既未领取输入也未记录任何工具调用，通知会以 `It sent you a message just before finishing, so its closing message is omitted.` 替代这些文本块；父级只有再次向子级发送消息才能取回被省略的收尾文本。外部通知还说明不支持后续消息。推理及其他非文本块被排除。每条父级通知都会以 `Structured result: <JSON>` 附带可用的结构化输出，并以独立文本块附带任何安全诊断。该文本由外部后端撰写；本地子级的失败则提供其 harness 代码与消息链，例如 `CONTEXT_WINDOW_EXCEEDED: …`，父级据此区分上下文耗尽与后端故障。收尾文本为空时，通知使用 `It left no closing message.`。调用方投递不发送通知；清理成功时 SDK 生命周期通知保留完整子级输出。
 
 #### Token 影响
 
@@ -239,6 +245,7 @@ You are a delegated subagent: your permission scope was fixed when you were star
 - **待处理的注入上下文会保留 Activation**——settlement 会保守地把每个 Inbox occurrence 都视为未完成。Agent 进入 idle 后停放的上下文会让 child 及其在线祖先继续驻留，直到唤醒投递将其 claim、queue 变更将其移除，或 manager teardown 将其丢弃。宿主完成检查等待活动工作、待创建子级与资源清理，但不会等待仅包含空闲停放 Inbox 的子树；它既不结算这些 activation 的结果，也不丢弃其消息。
 - **驻留仅限进程内**——Activation inbox 与所有权图不会在两个 harness 进程之间协调；对单个持久化存储的并发访问需要持久化邮箱与跨进程租约协议。
 - **不回放已接受但未记录的消息**——崩溃可能丢失从未写入子会话日志、已被接受的提示词；丢失的消息不会自动回放。
+- **期限只能协作式取消**——`childRunDeadlineMs` 能让忽略取消的子级停下，但速度取决于该子级何时让出。它保证的是停止原因与诊断，而不是强制终止。
 - **生命周期事件只供观察**——影响运行的 `subagent/end` 延续或决策接口仍需等待具体消费方。
 
 <a id="dev-note"></a>

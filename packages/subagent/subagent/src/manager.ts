@@ -158,11 +158,13 @@ export class SubagentManager {
    * @param ctx - context providing Agents, Sessions, and teardown ownership.
    * @param host - descriptor reads and lifecycle publication owned by the service.
    * @param maxActiveSubagents - the current configured child capacity.
+   * @param childRunDeadlineMs - the current configured run deadline per child; `0` disarms it.
    */
   constructor(
     private readonly ctx: Context,
     private readonly host: SubagentHost,
     private readonly maxActiveSubagents: () => number,
+    private readonly childRunDeadlineMs: () => number,
   ) {
     // Drain managed instances before Cordis releases their owning scope.
     const scope = ctx.plugin(function activationOwner() {})
@@ -745,6 +747,8 @@ export class SubagentManager {
   /** Close admission synchronously and share one release, including startup rollback. */
   private close(activation: Activation, release: () => Promise<void>): Promise<void> {
     if (activation.closing !== undefined) return activation.closing
+    activation.deadline?.dispose()
+    activation.deadline = undefined
     const completion = Promise.withResolvers<void>()
     activation.closing = completion.promise
     void release().then(completion.resolve, completion.reject)
@@ -864,6 +868,8 @@ export class SubagentManager {
         outputStart: handle.agent.session.seq,
         structured,
         failureAt: undefined,
+        failureDetail: undefined,
+        stopOverride: undefined,
         poke: Promise.withResolvers<void>(),
         omitClosingText: false,
       }
@@ -882,6 +888,8 @@ export class SubagentManager {
       result: Promise.withResolvers<SubagentResult>(),
       closing: undefined,
       accepted: false,
+      stopDetail: undefined,
+      deadline: undefined,
     }
     void activation.result.promise.catch(() => undefined)
     this.resident.set(childId, activation)
@@ -932,6 +940,7 @@ export class SubagentManager {
   /** Record acceptance and begin settlement observation before returning the receipt. */
   private accept(activation: Activation): void {
     activation.accepted = true
+    this.armDeadline(activation)
     if (activation.kind === 'local') {
       this.watchLocalSettlement(activation)
     } else {
@@ -958,6 +967,30 @@ export class SubagentManager {
     if (activation.kind === 'external') return
     activation.poke.resolve()
     activation.poke = Promise.withResolvers<void>()
+  }
+
+  /** Start this epoch's run deadline, if the deployment configures one. */
+  private armDeadline(activation: Activation): void {
+    const timeoutMs = this.childRunDeadlineMs()
+    if (timeoutMs <= 0) return
+    const timer = setTimeout(() => { this.expireRun(activation, timeoutMs) }, timeoutMs)
+    // A stuck child can hold no other handle; the deadline must not be the reason
+    // the host process stays alive.
+    timer.unref()
+    activation.deadline = { dispose: () => { clearTimeout(timer) } }
+  }
+
+  /**
+   * Stop an epoch whose run deadline elapsed. Cancellation is cooperative, so a
+   * tool that ignores it still delays settlement; the parent learns the deadline
+   * from the diagnostic instead of waiting indefinitely for an ending.
+   */
+  private expireRun(activation: Activation, timeoutMs: number): void {
+    // A callback already queued behind the epoch's own close is harmless: closing
+    // is memoized, so it shares the finished transaction instead of reopening it.
+    activation.stopDetail = `Stopped after the ${timeoutMs} ms subagent run deadline elapsed.`
+    if (activation.kind === 'local') activation.stopOverride = 'aborted'
+    void this.dispose(activation).catch((error: unknown) => { this.reportTeardownFailure(activation, error) })
   }
 
   /** Follow one Activation to natural settlement. */
@@ -1066,6 +1099,9 @@ export class SubagentManager {
         'ACTIVATION_TEARDOWN_FAILED',
         { cause: error },
       ))
+    }
+    if (activation.stopDetail !== undefined && result.stopReason !== 'completed') {
+      result = { ...result, diagnostic: activation.stopDetail }
     }
     try {
       if (activation.kind === 'local') await activation.handle.dispose()

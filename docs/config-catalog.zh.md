@@ -3645,6 +3645,12 @@ export interface Config {
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /**
+   * Wall-clock limit for one child run, in milliseconds; `0` (the default) leaves
+   * it unbounded. On expiry the child is cancelled and its parent receives an
+   * `aborted` result carrying the deadline as its diagnostic.
+   */
+  childRunDeadlineMs: Volatile<number>
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-subagent -->

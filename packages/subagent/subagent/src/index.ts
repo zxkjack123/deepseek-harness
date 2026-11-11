@@ -188,6 +188,12 @@ export interface Config {
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /**
+   * Wall-clock limit for one child run, in milliseconds; `0` (the default) leaves
+   * it unbounded. On expiry the child is cancelled and its parent receives an
+   * `aborted` result carrying the deadline as its diagnostic.
+   */
+  childRunDeadlineMs: Volatile<number>
 }
 
 /** Named provider registry with managed activations, durable discovery, and local child messaging. */
@@ -195,6 +201,8 @@ export class SubagentRuntime extends TypertRemoteService {
   static Config = z.object({
     maxDepth: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
     maxActiveSubagents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8).volatile(),
+    // `setTimeout` clamps larger delays to one millisecond, so the schema caps here.
+    childRunDeadlineMs: z.number().step(1).min(0).max(2_147_483_647).default(0).volatile(),
   })
   static inject = ['workingDirectory', 'sessionProjections']
   private providers = new Map<string, SubagentProvider>()
@@ -222,7 +230,7 @@ export class SubagentRuntime extends TypertRemoteService {
         identityOf: session => identityProjection.stateOf(session).identity,
         catalogOf: session => subagentCatalogProjectionDefinition.wire.view(catalogProjection.stateOf(session)),
         emitLifecycle: this.emitLifecycle,
-      }, () => this.config.maxActiveSubagents.get())
+      }, () => this.config.maxActiveSubagents.get(), () => this.config.childRunDeadlineMs.get())
       this.manager = manager
       childCtx.effect(() => () => {
         /* v8 ignore else -- one injected binding owns the slot until its fiber disposes. */

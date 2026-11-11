@@ -16,11 +16,14 @@ const capabilities: SubagentCapabilities = {
   agentOptions: false, agentPreset: false, outputSchema: false, depthLimit: false,
 }
 
-async function setup(start: (request: SubagentStartRequest) => Promise<SubagentRun>) {
+async function setup(
+  start: (request: SubagentStartRequest) => Promise<SubagentRun>,
+  config: { childRunDeadlineMs?: number } = {},
+) {
   const ctx = new Context()
   await ctx.plugin(SessionProjectionRegistry)
   await mountWorkingDirectoryFixture(ctx)
-  await ctx.plugin(SubagentRuntime)
+  await ctx.plugin(SubagentRuntime, config)
   const parent = await externalTestParent(ctx)
   await ctx.plugin(TestSessionQuery)
   ctx.subagents.registerProvider({ name: 'external', capabilities, inheritsParentContext: false, start })
@@ -52,6 +55,34 @@ const completed: SubagentResult = {
 }
 
 describe('external subagent activations', () => {
+  it('stops an external run at its deadline and reports the resulting teardown failure', async () => {
+    const aborted = Promise.withResolvers<undefined>()
+    const disposed = vi.fn(() => Promise.resolve(undefined))
+    const fixture = await setup(
+      async ({ signal }) => ({
+        id: SessionId('deadline-task'),
+        // A backend that never settles by itself: only disposal ends this run.
+        result: new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            aborted.resolve(undefined)
+            reject(new Error('aborted by parent'))
+          }, { once: true })
+        }),
+        dispose: disposed,
+      }),
+      { childRunDeadlineMs: 10 },
+    )
+    const warn = vi.spyOn(fixture.ctx.logger, 'warn')
+    const started = await fixture.start()
+
+    await aborted.promise
+    // The backend's own rejection is what the caller sees; the deadline's abort
+    // must not be silently reported as a clean stop.
+    await expect(started.result).rejects.toThrow('aborted by parent')
+    expect(disposed).toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('activation teardown failed'))
+  })
+
   it('keeps startup cancellation attached until unpublished resources finish cleanup', async () => {
     const entered = Promise.withResolvers<AbortSignal>()
     const cancelled = Promise.withResolvers<undefined>()
