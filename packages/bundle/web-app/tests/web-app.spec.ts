@@ -2,14 +2,15 @@
 
 import { EventEmitter } from 'node:events'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import * as AppBoot from '@deepseek-ai/dsh-app-boot'
+import * as AtomicWrite from '@deepseek-ai/dsh-atomic-write'
 import { createLaunchEnvironmentSnapshot, DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { bindUrlHost, type WebServer } from '@deepseek-ai/dsh-host-webserver'
 import { apply, Config, internals } from '../src/index.ts'
@@ -20,19 +21,34 @@ vi.mock('node:child_process', async importOriginal => ({
 }))
 
 let dist: string | undefined
+let launchHome: string
+const originalWrite = AtomicWrite.writeFileAtomic
+let writes: Promise<void>[]
 
 beforeEach(() => {
   vi.stubEnv('SSH_CONNECTION', '')
   vi.stubEnv('SSH_TTY', '')
+  writes = []
+  vi.spyOn(AtomicWrite, 'writeFileAtomic').mockImplementation((...args) => {
+    const pending = originalWrite(...args)
+    writes.push(pending)
+    return pending
+  })
+  // Every launch records its URL under the harness home; keep the operator's
+  // own home out of the suite and give each test its own.
+  launchHome = mkdtempSync(join(tmpdir(), 'dsh-web-app-home-'))
+  vi.stubEnv('DSH_HOME', launchHome)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.allSettled(writes)
   vi.restoreAllMocks()
   vi.mocked(spawn).mockReset()
   vi.unstubAllEnvs()
   internals.resolveDistIndex = originalResolve
   internals.openBrowser = originalOpenBrowser
   if (dist !== undefined) rmSync(dist, { recursive: true, force: true })
+  rmSync(launchHome, { recursive: true, force: true })
   dist = undefined
 })
 
@@ -179,7 +195,7 @@ describe('web-app runtime glue', () => {
     expect(ctx.webApp.getAdvertisedUrl()).toBe('https://proxy.example:8443/web/')
   })
 
-  it('publishes no readiness side effect when printing and browser opening are disabled', async () => {
+  it('publishes no readiness side effect when printing, browser opening, and the URL record are disabled', async () => {
     stageDist()
     const ctx = new Context()
     ctx.provide('webServer', fakeHttpServer().server)
@@ -187,11 +203,97 @@ describe('web-app runtime glue', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     const openBrowser = vi.fn(async () => {})
     internals.openBrowser = openBrowser
-    apply(ctx, new Config({ openBrowser: false, printUrl: false, surfaceContext: true }))
+    apply(ctx, new Config({ openBrowser: false, printUrl: false, surfaceContext: true, launchUrlFile: false }))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(log).not.toHaveBeenCalled()
     expect(openBrowser).not.toHaveBeenCalled()
+    expect(existsSync(join(launchHome, 'web-url.txt'))).toBe(false)
     await ctx.fiber.dispose()
+  })
+
+  it('records the authenticated URL for a later re-open even when the line is suppressed', async () => {
+    stageDist()
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    ctx.provide('webServer', fakeHttpServer().server)
+    provideConnection(ctx)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const file = join(launchHome, 'web', 'launch-url')
+    apply(ctx, new Config({
+      openBrowser: false, printUrl: false, surfaceContext: false, launchUrlFile: file,
+    }))
+    await vi.waitFor(() => { expect(existsSync(file)).toBe(true) })
+
+    expect(readFileSync(file, 'utf8')).toBe('http://127.0.0.1:4567/?token=test-token\n')
+    expect(log).not.toHaveBeenCalled()
+    if (process.platform !== 'win32') {
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(statSync(dirname(file)).mode & 0o777).toBe(0o700)
+    }
+  })
+
+  it('records the launch URL under DSH_HOME when the composition names no file', async () => {
+    stageDist()
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    ctx.provide('webServer', fakeHttpServer().server)
+    provideConnection(ctx)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    apply(ctx, new Config({ openBrowser: false, printUrl: true, surfaceContext: false }))
+    const file = join(launchHome, 'web-url.txt')
+    await vi.waitFor(() => {
+      expect(readFileSync(file, 'utf8')).toBe('http://127.0.0.1:4567/?token=test-token\n')
+    })
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600)
+  })
+
+  it('replaces the previous launch URL and narrows a wider permission mode', async () => {
+    stageDist()
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    ctx.provide('webServer', fakeHttpServer().server)
+    provideConnection(ctx)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const file = join(launchHome, 'web-url.txt')
+    writeFileSync(file, 'http://stale.example:4567/?token=stale\n', { mode: 0o644 })
+    apply(ctx, new Config({ openBrowser: false, printUrl: true, surfaceContext: false }))
+    await vi.waitFor(() => {
+      expect(readFileSync(file, 'utf8')).toBe('http://127.0.0.1:4567/?token=test-token\n')
+    })
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600)
+  })
+
+  it('reports one diagnostic and keeps starting up when the launch URL cannot be written', async () => {
+    stageDist()
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    ctx.provide('webServer', fakeHttpServer().server)
+    provideConnection(ctx)
+    const blocker = join(launchHome, 'blocker')
+    writeFileSync(blocker, '')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    apply(ctx, new Config({
+      openBrowser: false, printUrl: true, surfaceContext: false, launchUrlFile: join(blocker, 'web-url.txt'),
+    }))
+    await vi.waitFor(() => { expect(diagnostic).toHaveBeenCalledOnce() })
+
+    expect(String(diagnostic.mock.calls[0]?.[0])).toMatch(/^web-app: could not write the launch URL to .* because .*E(?:EXIST|NOTDIR)/u)
+    expect(log).toHaveBeenCalledWith('dsh web: http://127.0.0.1:4567/?token=test-token')
+    expect(ctx.get('webServer')).toBeDefined()
+  })
+
+  it('contains non-Error write failures without printing the credential', async () => {
+    stageDist()
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    ctx.provide('webServer', fakeHttpServer().server)
+    provideConnection(ctx)
+    vi.mocked(AtomicWrite.writeFileAtomic).mockRejectedValueOnce('storage unavailable')
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    apply(ctx, new Config({ openBrowser: false, printUrl: false, surfaceContext: false }))
+    await vi.waitFor(() => { expect(diagnostic).toHaveBeenCalledOnce() })
+    expect(diagnostic).toHaveBeenCalledWith(`web-app: could not write the launch URL to ${join(launchHome, 'web-url.txt')} because storage unavailable`)
   })
 
   it('skips the surface context when disabled (the one-shot layer): no bash variables', async () => {
@@ -299,7 +401,7 @@ describe('web-app runtime glue', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     apply(declared, new Config({
-      openBrowser: false, printUrl: true, surfaceContext: false, publicUrl: 'https://app.example/ui/',
+      openBrowser: false, printUrl: true, surfaceContext: false, publicUrl: 'https://app.example/ui/', launchUrlFile: false,
     }))
     await vi.waitFor(() => { expect(log).toHaveBeenCalled() })
     expect(log).toHaveBeenCalledWith('dsh web: https://app.example/ui/?token=test-token')

@@ -56,6 +56,7 @@ The `minimal` agent preset uses a persistent shell, the `read_image` tool, and a
 |---|---|---|
 | `openBrowser` | `true` | Open the default browser after startup; SSH launches suppress it |
 | `printUrl` | `true` | Print the `dsh web:` URL line at startup |
+| `launchUrlFile` | `$DSH_HOME/web-url.txt` | Record the authenticated launch URL; `false` disables persistence |
 | `surfaceContext` | `true` | Expose `DSH_WEB_URL` to the agent's shell commands |
 | `publicUrl` | Unset | Advertised HTTP(S) application root; otherwise announce the bind-address URL |
 
@@ -83,6 +84,8 @@ Without `--public-url`, mapped IPv6 loopback binds such as `::ffff:127.0.0.1` ad
 Neither the advertised URL nor the browser-trust fence protects the port itself, so restrict the port to the trusted proxy or network.
 
 The printed URL contains a process credential; share it only with intended users. `printUrl: false` suppresses the line with or without `--public-url`, and the credential never appears in the model context or in `DSH_WEB_URL`.
+
+The same URL is recorded asynchronously at readiness even when `printUrl` is false, so it remains recoverable after a full-screen terminal client hides the startup line. `launchUrlFile` accepts a nonempty file path (relative paths use the process working directory) or `false` to disable writing. The default is `$DSH_HOME/web-url.txt`, falling back to `~/.dsh/web-url.txt` when `DSH_HOME` is unset or empty. Each launch atomically replaces the file with the URL and a newline, using mode `0600` and creating parent directories with `0700`; existing directories retain their permissions. A write failure emits one diagnostic without stopping startup. Protect the directory and its backups as credentials; this does not protect against the same OS user or privileged readers, and Windows ACLs require deployment-specific protection. Multiple processes using the same file overwrite each other; configure distinct files for simultaneous deployments. Disabling persistence does not remove an earlier file.
 
 ### Running over SSH
 

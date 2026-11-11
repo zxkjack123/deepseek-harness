@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-11-11-web-launch-url-persist.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-11-11-web-launch-url-persist.md
+/agent-note-persist-the-web-launch-url:
+  en: 5812b3512d746706
+  zh: 351ef181f3cf94df
+/agent-note-persist-the-web-launch-url/problem:
+  en: f99780267110884c
+  zh: dd6913b12b2d3625
+/agent-note-persist-the-web-launch-url/decision:
+  en: 9c17070ac986500c
+  zh: b1ea6683a623f5a3
+/agent-note-persist-the-web-launch-url/alternatives-considered:
+  en: 4ddaeab0d01d346c
+  zh: 1aac6f09093b082e
+/agent-note-persist-the-web-launch-url/consequences:
+  en: 258088b5523fb89b
+  zh: fb25d970151c2388

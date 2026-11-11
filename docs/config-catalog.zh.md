@@ -4668,7 +4668,7 @@ export interface WebRuntimeConfig {
 ## `@deepseek-ai/dsh-web-app`
 
 - `inject`: `webServer`
-- `source`: [`packages/bundle/web-app/src/index.ts:55`](../packages/bundle/web-app/src/index.ts)
+- `source`: [`packages/bundle/web-app/src/index.ts:60`](../packages/bundle/web-app/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: composed deployment settings plus per-invocation command-line values. */
@@ -4690,6 +4690,13 @@ export interface Config {
    * Absent or YAML `null` advertises the bind-address URL.
    */
   publicUrl?: string
+  /**
+   * File receiving this launch's authenticated entry URL, so an operator can
+   * reopen the GUI after the terminal lost the printed line. Every start
+   * replaces it with mode `0o600` inside a `0o700` directory. Absent writes
+   * `$DSH_HOME/web-url.txt`; `false` writes no file.
+   */
+  launchUrlFile?: string | false
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-app -->

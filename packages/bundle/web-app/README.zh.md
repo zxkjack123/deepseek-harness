@@ -56,6 +56,7 @@ dsh --profile web --no-open --port 8080
 |---|---|---|
 | `openBrowser` | `true` | 启动后用默认浏览器打开；SSH 启动会抑制它 |
 | `printUrl` | `true` | 启动时打印 `dsh web:` URL 行 |
+| `launchUrlFile` | `$DSH_HOME/web-url.txt` | 保存带认证的启动 URL；`false` 关闭落盘 |
 | `surfaceContext` | `true` | 把 `DSH_WEB_URL` 暴露给 agent 的 shell 命令 |
 | `publicUrl` | 未设置 | 对外公告的 HTTP(S) 应用根；否则公告绑定地址 URL |
 
@@ -83,6 +84,8 @@ dsh --profile web --no-open --host "$(hostname -i | awk '{print $1}')" --public-
 无论是公告 URL 还是浏览器信任栅栏都不保护端口本身，因此请把端口限制在可信代理或网络内。
 
 打印的 URL 包含进程凭据，只应与预期用户分享。`printUrl: false` 无论是否配置 `--public-url` 都会抑制该行，凭据也绝不会出现在模型上下文或 `DSH_WEB_URL` 中。
+
+就绪时会异步保存相同的 URL，即使 `printUrl` 为 false 也一样，因此全屏终端客户端遮住启动行后仍能找回入口。`launchUrlFile` 接受非空文件路径（相对路径基于进程工作目录）或用于关闭写入的 `false`。默认路径为 `$DSH_HOME/web-url.txt`；`DSH_HOME` 未设置或为空时回退到 `~/.dsh/web-url.txt`。每次启动原子替换文件，内容是 URL 加换行，文件权限为 `0600`，新建父目录权限为 `0700`；已有目录保留原权限。写入失败只输出一条诊断，不阻止启动。请按凭据保护目录及其备份；这无法防止同一操作系统用户或特权用户读取，Windows ACL 需要部署方另行保护。多个进程写同一文件会互相覆盖；并行部署应配置不同文件。关闭落盘不会删除以前的文件。
 
 ### 通过 SSH 运行
 

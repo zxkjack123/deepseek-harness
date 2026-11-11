@@ -8,7 +8,10 @@
  * default-browser handoff, and provides the `webApp` service. An advertised
  * `publicUrl` replaces the published bind-address URL. Non-loopback
  * HTTP binds trigger an exposure warning. App command-line values arrive
- * through the `webStartup` service expressions in the bundle patch.
+ * through the `webStartup` service expressions in the bundle patch. The
+ * authenticated entry URL is also recorded on disk, because the process token
+ * exists only in that URL and a full-screen client can scroll the single
+ * printed line away.
  * @module @deepseek-ai/dsh-web-app
  */
 
@@ -18,7 +21,9 @@ import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { auditStartupEntries } from '@deepseek-ai/dsh-app-boot'
+import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import * as FrontendStatic from '@deepseek-ai/dsh-host-frontend-static'
 import { bindUrlHost, isLoopbackHost } from '@deepseek-ai/dsh-host-webserver'
 import { launchedThroughSsh, launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
@@ -70,6 +75,13 @@ export interface Config {
    * Absent or YAML `null` advertises the bind-address URL.
    */
   publicUrl?: string
+  /**
+   * File receiving this launch's authenticated entry URL, so an operator can
+   * reopen the GUI after the terminal lost the printed line. Every start
+   * replaces it with mode `0o600` inside a `0o700` directory. Absent writes
+   * `$DSH_HOME/web-url.txt`; `false` writes no file.
+   */
+  launchUrlFile?: string | false
 }
 
 export const Config: z<Config> = z.object({
@@ -77,6 +89,7 @@ export const Config: z<Config> = z.object({
   printUrl: z.boolean().default(true),
   surfaceContext: z.boolean().default(true),
   publicUrl: z.transform(z.string(), value => parsePublicUrl(value).href),
+  launchUrlFile: z.union([z.string().min(1), z.const(false)]),
 })
 
 /** Environment variable naming the advertised URL of this Web GUI. */
@@ -142,6 +155,30 @@ function spawnBrowserLauncher(url: string): ChildProcess {
   })
 }
 
+/**
+ * Resolve where this launch records its authenticated entry URL.
+ * @param configured - `launchUrlFile` from the composition.
+ * @returns The configured path, `$DSH_HOME/web-url.txt` when unset, or `undefined` when `false` disables the record.
+ */
+function resolveLaunchUrlFile(configured: string | false | undefined): string | undefined {
+  if (configured === false) return undefined
+  return configured ?? dshHomePath('web-url.txt')
+}
+
+/**
+ * Record the authenticated entry URL of this launch, replacing the previous
+ * launch's URL. A failed write reports one diagnostic and leaves startup and
+ * every other readiness signal untouched.
+ * @param file - target file, written with owner-only permissions.
+ * @param url - authenticated entry URL naming this process's GUI.
+ */
+function recordLaunchUrl(file: string, url: string): void {
+  void writeFileAtomic(file, `${url}\n`, { mode: 0o600, dirMode: 0o700 }).catch((error: unknown) => {
+    const reason = error instanceof Error ? error.message : String(error)
+    console.error(`web-app: could not write the launch URL to ${file} because ${reason}`)
+  })
+}
+
 /** Hand one URL to the operating system's default browser. */
 async function openBrowser(url: string): Promise<void> {
   const launcher = spawnBrowserLauncher(url)
@@ -200,6 +237,7 @@ export function apply(ctx: Context, config: Config): void {
   // The bind URL belongs to this host. Under SSH, the operator reaches it
   // through a local forwarding address that this process cannot derive.
   const handoffBrowser = config.openBrowser && !launchedThroughSsh(launchEnvironmentOf(ctx))
+  const launchUrlFile = resolveLaunchUrlFile(config.launchUrlFile)
   /** The advertised root: the canonical `publicUrl`, or the listener's own origin. */
   const appRootUrl = (): string => publicUrl ?? ctx.webServer.getOrigin()
   ctx.provide('webApp', { getAdvertisedUrl: appRootUrl } satisfies WebApp)
@@ -215,7 +253,7 @@ export function apply(ctx: Context, config: Config): void {
       })
     })
   }
-  if (config.printUrl || handoffBrowser) {
+  if (config.printUrl || handoffBrowser || launchUrlFile !== undefined) {
     ctx.inject(['connection'], (connectionCtx) => {
       // The URL line and browser handoff are readiness signals: supervisors RPC
       // as soon as they observe the line, while a browser requests the page as
@@ -227,6 +265,7 @@ export function apply(ctx: Context, config: Config): void {
         const webUrl = appRootUrl()
         const authenticatedUrl = connectionCtx.connection.authenticatedUrl(webUrl)
         ANNOUNCED_ROOTS.add(connectionCtx.root)
+        if (launchUrlFile !== undefined) recordLaunchUrl(launchUrlFile, authenticatedUrl)
         if (config.printUrl) {
           console.log(`dsh web: ${authenticatedUrl}`)
         }

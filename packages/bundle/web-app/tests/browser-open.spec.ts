@@ -72,6 +72,7 @@ describe('web app browser startup', () => {
       '    openBrowser: true',
       '    printUrl: false',
       '    surfaceContext: false',
+      '    launchUrlFile: false',
       '',
     ].join('\n'))
 
