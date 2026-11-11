@@ -50,13 +50,14 @@ function remoteEventSource(ctx: Context): TypertRemoteEventSource {
   return (signal) => {
     const queue = new RemoteEventQueue()
     const disposers = API_REMOTE_FORWARDED_EVENTS.map((entry) => {
-      const { event, mode } = entry
-      if (mode === 'emit') {
+      if (entry.mode === 'emit') {
+        const { event } = entry
         const resources = 'resources' in entry ? entry.resources : undefined
         return ctx.on(event as never, ((...args: unknown[]) => {
           queue.push({ event, args: assertJsonArgs(event, args), ...resources === undefined ? {} : { resources } })
         }) as never)
       }
+      const { event } = entry
       return ctx.on(event as never, (function (
         this: unknown,
         request: object,
@@ -74,6 +75,7 @@ function remoteEventSource(ctx: Context): TypertRemoteEventSource {
           request,
           { value: agent.ctx, subject: agent, agentId: agent.id },
           next,
+          'raceWithHost' in entry ? { hostAbsentValue: entry.hostAbsentValue } : undefined,
         )
       }) as never)
     })
@@ -86,6 +88,7 @@ function remoteEventSource(ctx: Context): TypertRemoteEventSource {
 /** One pull-driven queue bridging synchronous Cordis listeners to an AsyncIterable. */
 class RemoteEventQueue {
   private readonly buffer = new Deque<TypertRemoteEventDispatch>()
+  private readonly handovers = new Map<TypertRemoteEventDispatch, (claimed: boolean) => void>()
   private waiter: (() => void) | undefined
   private done = false
 
@@ -96,9 +99,24 @@ class RemoteEventQueue {
     return true
   }
 
+  /**
+   * Resolve once the Gateway has consumed this dispatch and asked for the next
+   * frame; false when the queue ends first. A forwarded waterfall that races
+   * its Host chain starts that chain only after this handoff, so a Host
+   * decision can always withdraw a Client card the Gateway already delivered.
+   * @param dispatch - invocation accepted by {@link push}.
+   * @returns whether the Gateway claimed the invocation.
+   */
+  handover(dispatch: TypertRemoteEventDispatch): Promise<boolean> {
+    if (this.done) return Promise.resolve(false)
+    return new Promise<boolean>((resolve) => { this.handovers.set(dispatch, resolve) })
+  }
+
   private end(reason: unknown): void {
     if (this.done) return
     this.done = true
+    for (const resolve of this.handovers.values()) resolve(false)
+    this.handovers.clear()
     while (this.buffer.size > 0) {
       const dispatch = this.buffer.popFront() as TypertRemoteEventDispatch
       if ('context' in dispatch) dispatch.reject(reason)
@@ -112,7 +130,12 @@ class RemoteEventQueue {
     try {
       while (true) {
         if (this.done || signal.aborted) return
-        while (this.buffer.size > 0) yield this.buffer.popFront() as TypertRemoteEventDispatch
+        while (this.buffer.size > 0) {
+          const dispatch = this.buffer.popFront() as TypertRemoteEventDispatch
+          yield dispatch
+          this.handovers.get(dispatch)?.(true)
+          this.handovers.delete(dispatch)
+        }
         await new Promise<void>((resolve) => { this.waiter = resolve })
         this.waiter = undefined
       }
@@ -135,7 +158,7 @@ function remoteEventSourceEndReason(signal: AbortSignal): unknown {
 }
 
 /** Bridge one Cordis waterfall listener through the Gateway-owned pending event. */
-function forwardWaterfall(
+function delegateForwardWaterfall(
   queue: RemoteEventQueue,
   event: string,
   request: object,
@@ -155,9 +178,125 @@ function forwardWaterfall(
       void Promise.resolve().then(next).then(settled.resolve, settled.reject)
     },
     reject: settled.reject,
+    dismiss: () => {
+      // The delegation path settles only from a Client answer or Host delegation.
+    },
   }
   if (!queue.push(dispatch)) void Promise.resolve().then(next).then(settled.resolve, settled.reject)
   return settled.promise
+}
+
+/** Host fallback value that means the Host chain composed no answerer. */
+interface WaterfallRace {
+  readonly hostAbsentValue: unknown
+}
+
+/**
+ * Bridge one Cordis waterfall listener, racing the forwarded Client answer
+ * against the Host chain.
+ *
+ * The first decision wins: a Client result, or a Host value other than the
+ * declared no-answerer value. A Host rejection and the declared no-answerer
+ * value are not decisions, so a later Client answer still wins. A Host
+ * decision withdraws the Client card through the Gateway-installed `dismiss`;
+ * with neither path deciding, the Host outcome is returned.
+ * @param queue - source queue consumed by the Gateway.
+ * @param event - forwarded Cordis event name.
+ * @param request - Host waterfall request.
+ * @param context - Agent Context carried by the invocation.
+ * @param next - continuation of the Host listener chain.
+ * @param race - declared no-answerer value for this event.
+ * @returns the first decision, or the Host outcome when neither path decided.
+ */
+function raceForwardWaterfall(
+  queue: RemoteEventQueue,
+  event: string,
+  request: object,
+  context: TypertRemoteEventInvocation['context'],
+  next: () => unknown,
+  race: WaterfallRace,
+): Promise<unknown> {
+  const settled = Promise.withResolvers<unknown>()
+  let decided = false
+  let clientDone = false
+  let hostOutcome:
+    | { readonly kind: 'value'; readonly value: unknown }
+    | { readonly kind: 'error'; readonly error: unknown }
+    | undefined
+
+  const settleValue = (value: unknown): void => {
+    if (decided) return
+    decided = true
+    settled.resolve(value)
+  }
+  const settleError = (error: unknown): void => {
+    if (decided) return
+    decided = true
+    settled.reject(error)
+  }
+  const settleHostOutcome = (): void => {
+    if (hostOutcome === undefined) return
+    if (hostOutcome.kind === 'value') settleValue(hostOutcome.value)
+    else settleError(hostOutcome.error)
+  }
+
+  const invocation: TypertRemoteEventInvocation = {
+    event,
+    request,
+    context,
+    resolve: (outcome) => {
+      if (outcome.kind === 'result') {
+        settleValue(outcome.value)
+        return
+      }
+      clientDone = true
+      settleHostOutcome()
+    },
+    reject: settleError,
+    dismiss: () => {
+      // Replaced by the Gateway when it claims this invocation.
+    },
+  }
+
+  const startHost = (): void => {
+    // The Gateway can reject the invocation (validation, cancellation) before the
+    // handoff: a settled race never asks the Host chain.
+    if (decided) return
+    void Promise.resolve().then(next).then(
+      (value) => {
+        if (race.hostAbsentValue !== undefined && value === race.hostAbsentValue) {
+          hostOutcome = { kind: 'value', value }
+          if (clientDone) settleHostOutcome()
+          return
+        }
+        if (decided) return
+        settleValue(value)
+        invocation.dismiss()
+      },
+      (error: unknown) => {
+        hostOutcome = { kind: 'error', error }
+        if (clientDone) settleHostOutcome()
+      },
+    )
+  }
+
+  if (!queue.push(invocation)) startHost()
+  else void queue.handover(invocation).then((claimed) => { if (claimed) startHost() })
+  return settled.promise
+}
+
+/** Bridge one Cordis waterfall listener through the Gateway-owned pending event. */
+function forwardWaterfall(
+  queue: RemoteEventQueue,
+  event: string,
+  request: object,
+  context: TypertRemoteEventInvocation['context'],
+  next: () => unknown,
+  race: WaterfallRace | undefined,
+): Promise<unknown> {
+  return race === undefined
+    ? delegateForwardWaterfall(queue, event, request, context, next)
+    : raceForwardWaterfall(queue, event, request, context, next, race)
 }
 
 /** Reject an allowlisted event whose runtime arguments are not lossless JSON data. */

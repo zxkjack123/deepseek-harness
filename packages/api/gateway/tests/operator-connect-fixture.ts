@@ -87,7 +87,7 @@ export default class OperatorConnectFixture extends TypertRemoteService {
     this.dispatches.push({
       event: 'fixture/approval', request: { agent: subject, prompt: label },
       context: { value: this.ctx, subject, agentId: `agent-${label}` },
-      resolve: settled.resolve, reject: settled.reject,
+      resolve: settled.resolve, reject: settled.reject, dismiss: () => {},
     })
     this.wake?.()
     this.wake = undefined

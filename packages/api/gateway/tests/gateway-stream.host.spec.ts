@@ -330,6 +330,7 @@ function pendingInvocation(
       context: { value: context, subject, agentId: identity as string },
       resolve,
       reject,
+      dismiss: vi.fn(),
     },
     outcome: settled.promise,
     resolve,
@@ -1200,7 +1201,9 @@ describe('Typert Remote streams', () => {
     const rejected = expect(pending.outcome).rejects.toThrow(
       'forwarded Remote event source was removed',
     )
+    const publish = Promise.withResolvers<undefined>()
     const unregister = ctx.typertGateway.registerRemoteEvents(signal => (async function* () {
+      await publish.promise
       yield pending.dispatch
       await new Promise<void>((resolve) => {
         if (signal.aborted) resolve()
@@ -1209,6 +1212,7 @@ describe('Typert Remote streams', () => {
       throw new Error('fixture source rejected during removal')
     })(), REMOTE_HOST)
     const client = await openEventClient(ctx, 'events-removal')
+    publish.resolve(undefined)
     await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
 
     await unregister()
@@ -1302,10 +1306,13 @@ describe('Typert Remote streams', () => {
   })
 
   it('retries a colliding Remote event id before publishing the second waterfall', async () => {
-    const { ctx } = await setup(false)
+    const { ctx } = await setup(true)
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const agent = ctx.extend()
+    const client = await openEventClient(ctx, 'events-collision')
+    // Opening the Client consumed its own id; count only the event ids below.
+    randomUuid.mockClear()
     const firstId = '00000000-0000-4000-8000-000000000001' as ReturnType<typeof randomUUID>
     const secondId = '00000000-0000-4000-8000-000000000002' as ReturnType<typeof randomUUID>
     randomUuid.mockReturnValueOnce(firstId).mockReturnValueOnce(firstId).mockReturnValueOnce(secondId)
@@ -1327,6 +1334,7 @@ describe('Typert Remote streams', () => {
     secondAbort.abort(secondReason)
     await firstRejected
     await secondRejected
+    client.socket.close()
     await unregister()
   })
 
@@ -1460,7 +1468,71 @@ describe('Typert Remote streams', () => {
     await unregister()
   })
 
-  it('delivers a pending waterfall to the first Client that connects', async () => {
+  it('delegates a scoped waterfall that reached no answering Client stream', async () => {
+    const { ctx } = await setup(false)
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const pending = pendingInvocation(ctx.extend(), undefined, 'no-client', agentId('agent-no-client'))
+
+    source.push(pending.dispatch)
+    await expect(pending.outcome).resolves.toEqual({ kind: 'next' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    expect(pending.reject).not.toHaveBeenCalled()
+    await unregister()
+  })
+
+  it('delegates a scoped waterfall when its last answering Client disconnects unanswered', async () => {
+    const { ctx } = await setup(true)
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const client = await openEventClient(ctx, 'events-disconnect')
+    const pending = pendingInvocation(ctx.extend(), undefined, 'disconnect', agentId('agent-disconnect'))
+
+    source.push(pending.dispatch)
+    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
+    const closed = once(client.socket, 'close')
+    client.socket.close()
+    await closed
+
+    await expect(pending.outcome).resolves.toEqual({ kind: 'next' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    expect(pending.reject).not.toHaveBeenCalled()
+    await unregister()
+  })
+
+  it('dismisses a delivered waterfall on every Client without settling its source', async () => {
+    const { ctx } = await setup(true)
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const first = await openEventClient(ctx, 'events-dismiss-a')
+    const second = await openEventClient(ctx, 'events-dismiss-b')
+    const pending = pendingInvocation(ctx.extend(), undefined, 'dismiss', agentId('agent-dismiss'))
+
+    source.push(pending.dispatch)
+    await vi.waitFor(() => {
+      expect(deliveredInvocation(first)).toBeDefined()
+      expect(deliveredInvocation(second)).toBeDefined()
+    })
+    const eventId = deliveredInvocation(first)!.eventId
+    pending.dispatch.dismiss()
+
+    await vi.waitFor(() => {
+      for (const client of [first, second]) {
+        expect(client.frames).toContainEqual({
+          type: 'item',
+          streamId: client.streamId,
+          value: { type: 'cancel', eventId },
+        })
+      }
+    })
+    expect(pending.resolve).not.toHaveBeenCalled()
+    expect(pending.reject).not.toHaveBeenCalled()
+    first.socket.close()
+    second.socket.close()
+    await unregister()
+  })
+
+  it('settles a waterfall with no answering Client instead of replaying it to a later Client', async () => {
     const { ctx } = await setup(true)
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
@@ -1468,20 +1540,11 @@ describe('Typert Remote streams', () => {
     const pending = pendingInvocation(agent, undefined, 'before-connect', agentId('agent-late-client'))
 
     source.push(pending.dispatch)
-    await vi.waitFor(() => { expect(randomUuid).toHaveBeenCalledTimes(1) })
+    await expect(pending.outcome).resolves.toEqual({ kind: 'next' })
 
-    const client = await openEventClient(ctx, 'events-first-client')
-    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
-    const frame = deliveredInvocation(client)!
-    expect(frame).toMatchObject({
-      type: 'waterfall',
-      event: 'fixture/approval',
-      agentId: 'agent-late-client',
-      request: { prompt: 'before-connect' },
-    })
-
-    await sendEventResult(client, frame, { kind: 'result', value: 'allowed' })
-    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+    const client = await openEventClient(ctx, 'events-late-client')
+    expect(deliveredInvocation(client)).toBeUndefined()
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
 
     client.socket.close()
     await unregister()
@@ -1493,6 +1556,8 @@ describe('Typert Remote streams', () => {
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const agent = ctx.extend()
     const original = await openEventClient(ctx, 'events-original')
+    // A second answering Client keeps the event pending after the original generation closes.
+    const keeper = await openEventClient(ctx, 'events-keeper')
     const pending = pendingInvocation(agent)
     source.push(pending.dispatch)
     await vi.waitFor(() => { expect(deliveredInvocation(original)).toBeDefined() })
@@ -1512,6 +1577,7 @@ describe('Typert Remote streams', () => {
     await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
 
     replacement.socket.close()
+    keeper.socket.close()
     await unregister()
   })
 

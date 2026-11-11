@@ -72,6 +72,14 @@ export interface TypertRemoteEventInvocation {
   readonly resolve: (outcome: TypertRemoteEventOutcome) => void
   /** Reject the source's Cordis listener after cancellation, transport failure, or Client rejection. */
   readonly reject: (reason: unknown) => void
+  /**
+   * Withdraw this pending event on every Client that received it, without
+   * settling the source listener. The Gateway replaces the source's no-op with
+   * this implementation while it claims the invocation, before it registers or
+   * delivers the event; the source calls it only after that, once its own Host
+   * chain has decided.
+   */
+  dismiss: () => void
 }
 
 /** Notification or scoped waterfall accepted from the sole Remote Event source. */

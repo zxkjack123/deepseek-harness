@@ -882,7 +882,9 @@ describe('ToolRuntime', () => {
       expect(seen[0]).toMatchObject({
         agent, toolName: 'echo', callId: 'c1', reason: 'hook wants a human', displayReason: { en: 'Allow it?', zh: '允许吗？' },
       })
-      expect(seen[0]?.signal).toBe(controller.signal)
+      // The answerer receives the request-scoped signal, withdrawn once the request settles.
+      expect(seen[0]?.signal).not.toBe(controller.signal)
+      expect(seen[0]?.signal?.aborted).toBe(true)
     })
 
     it('denies with the user-rejection reason on rejected', async () => {

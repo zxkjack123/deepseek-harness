@@ -686,6 +686,10 @@ export class TypertGatewayService extends Service implements TypertGateway {
           for (const signal of signals) signal.removeEventListener('abort', abort)
         },
       }
+      // Publish the Gateway-owned withdrawal on the invocation before the event is
+      // registered or delivered, so a source listener that decides through its own
+      // Host chain can withdraw every Client card this Gateway delivered.
+      source.dismiss = () => { this.dismissRemoteEvent(pending) }
       this.pendingRemoteEvents.set(id, pending)
       for (const signal of signals) signal.addEventListener('abort', abort, { once: true })
       if ([...signals].some(signal => signal.aborted)) abort()
@@ -693,6 +697,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
         for (const client of this.remoteEventClients.values()) {
           if (client.answers) this.deliverRemoteEvent(pending, client)
         }
+        // No answering Client stream can settle this event: delegate to the Host chain.
+        if (pending.deliveries.size === 0) this.settleRemoteEvent(pending, { kind: 'next' })
       }
     } catch (error) {
       source.reject(error)
@@ -733,8 +739,17 @@ export class TypertGatewayService extends Service implements TypertGateway {
 
   private removeRemoteEventClient(client: RemoteEventClient): void {
     this.remoteEventClients.delete(client.id)
-    for (const pending of [...client.deliveries.values()]) this.removeRemoteEventDelivery(pending, client)
+    for (const pending of [...client.deliveries.values()]) {
+      this.removeRemoteEventDelivery(pending, client)
+      // The last Client that could answer is gone: delegate to the Host chain instead of hanging.
+      if (pending.deliveries.size === 0) this.settleRemoteEvent(pending, { kind: 'next' })
+    }
     client.queue.end()
+  }
+
+  private dismissRemoteEvent(pending: PendingRemoteEvent): void {
+    if (this.pendingRemoteEvents.get(pending.id) !== pending) return
+    this.finishRemoteEvent(pending)
   }
 
   private settleRemoteEvent(pending: PendingRemoteEvent, outcome: TypertRemoteEventOutcome): void {

@@ -210,7 +210,7 @@ Each generation emits a complete baseline first, followed by jobs and projection
 
 Jobs use complete replacement values and apply last-wins. Projection updates carry monotonically increasing revisions, while a new baseline replaces the complete projection map. Session and owner disposal clear stale mirrors.
 
-The original `approval/request` and `user-questions/request` events are forwardable waterfalls. If an Agent-scoped Client listener claims a request, it returns directly. If all delivered Clients call `next()`, the original Cordis waterfall continues to later Host listeners. Session control neither stores nor replays these requests.
+The original `approval/request` and `user-questions/request` events are forwardable waterfalls. If an Agent-scoped Client listener claims a request, it returns directly. If all delivered Clients call `next()`, the original Cordis waterfall continues to later Host listeners. `approval/request` additionally races the Host chain against the Client answer so both human surfaces are asked. Session control neither stores nor replays these requests.
 
 The projection baseline and a tail page's log cut are produced independently. The Client always retains the value with the higher sequence number. Subscribing to live projection does not start an Agent merely to obtain a value.
 
@@ -277,11 +277,11 @@ The system does not scan arbitrarily deep objects, transmit path arrays or place
 
 When no Client adapter is registered, its resolver returns no Context, or resolution throws, that Client immediately returns `next`. It does not subscribe to a registry, recheck races after resolution, or create a temporary Fiber for one delivery.
 
-Gateway Host retains `eventId`, the Host continuation, and delivered Client generations for every unfinished waterfall. A new Client generation receives a replay of the same pending event.
+Gateway Host retains `eventId`, the Host continuation, and delivered Client generations for every unfinished waterfall. A new Client generation receives a replay of the same pending event while another delivering Client remains connected.
 
 Each generation's queue guarantees one delivery, so the Client stores no `seen` set. `clientId + eventId` binds a result to the current generation; a reply from an old connection cannot complete delivery on a new one.
 
-When several Clients receive a waterfall, the first result or rejection completes the Host invocation and sends `cancel` to the other Clients. Gateway continues the original Cordis chain only after every delivered Client returns `next`.
+When several Clients receive a waterfall, the first result or rejection completes the Host invocation and sends `cancel` to the other Clients. Gateway continues the original Cordis chain only after every delivered Client returns `next`, except for `approval/request`, which races the Host chain against the Client answer and dismisses the losing Client card; an event that no answering Client stream can settle delegates immediately ([decision](../bug-fix/2026-11-11-first-decision-wins-approval-surfaces.md)).
 
 Host caller-signal cancellation, Agent Context disposal, Client-generation completion, and losing-Client cancellation all terminate their corresponding waits.
 
@@ -291,7 +291,7 @@ Gateway only verifies that a waterfall return value has a lossless JSON represen
 
 When `UserQuestionService` observes that the caller's `AbortSignal` was canceled during a request and the provider threw an ordinary error, it normalizes that failure to `UserQuestionError` with `ASK_ABORTED` while retaining the original error as `cause`. A domain error already supplied by the provider preserves its identity.
 
-A failure of `$events/result` fails the current Connection generation. Host withdraws that Client's delivery with the generation, the pending event is replayed in the next generation, and Client maintains no second result-retry queue.
+A failure of `$events/result` fails the current Connection generation. Host withdraws that Client's delivery with the generation; the pending event is replayed in the next generation while another delivering Client remains connected, and otherwise delegates to the Host chain. Client maintains no second result-retry queue.
 
 Ordinary `$on` notifications are not replayed after disconnect. State whose correctness depends on recovery must have a query, cursor, or opening baseline and cannot rely on eventual Remote Event delivery.
 
@@ -379,7 +379,7 @@ Session and Workspace Host APIs, stream adapters, and Client data models each ha
 
 The general stream objects add three explicit layers while deleting the retry, cancellation, generation, baseline, and gap-repair shells previously duplicated by each Controller.
 
-Remote waterfalls preserve first claim across multiple Clients, continuation of the Host chain after every Client calls `next`, reconnect replay of pending calls, and end-to-end cancellation. The current protocol supports only top-level Agent scope and lossless-JSON requests and results.
+Remote waterfalls preserve first claim across multiple Clients, continuation of the Host chain after every Client calls `next` for rows that do not race it, Host racing for `approval/request`, reconnect replay of pending calls that still have a delivering Client, immediate Host delegation when no Client can answer, and end-to-end cancellation. The current protocol supports only top-level Agent scope and lossless-JSON requests and results.
 
 This decision extends the allowlist and single Cordis-signature design from [Remote event delivery](../../../../packages/api/remotes/README.md): ordinary notifications use `emit`, while Agent-scoped async waterfalls use the same `ctx.remote.$on` surface with explicit `waterfall` mode. It creates no second invocation map.
 

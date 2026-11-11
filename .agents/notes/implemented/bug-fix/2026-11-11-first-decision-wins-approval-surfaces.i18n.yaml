@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-11-11-first-decision-wins-approval-surfaces.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-11-11-first-decision-wins-approval-surfaces.md
+/agent-note-first-decision-wins-across-approval-surfaces:
+  en: cce98d8a4a450afc
+  zh: 4410c4da366953ef
+/agent-note-first-decision-wins-across-approval-surfaces/problem:
+  en: 51f00485074b8abe
+  zh: d8728d5855fa9a58
+/agent-note-first-decision-wins-across-approval-surfaces/decision:
+  en: cd7e4e387a3b7f1f
+  zh: e1c963e6f526ee4a
+/agent-note-first-decision-wins-across-approval-surfaces/alternatives-considered:
+  en: 1720fbb3288b3b5e
+  zh: 569de36722a2a41b
+/agent-note-first-decision-wins-across-approval-surfaces/consequences:
+  en: fc5973c947708790
+  zh: 8a9b0ee1643851b7

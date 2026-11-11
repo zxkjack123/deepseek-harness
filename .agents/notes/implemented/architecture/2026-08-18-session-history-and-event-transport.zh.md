@@ -210,7 +210,7 @@ initial page、repair page 或 follow 的 terminal failure 进入当前 Session 
 
 jobs 使用完整 replacement 值并按 last-wins 应用。Projection update 携带单调递增 revision，新 baseline 则替换完整 projection map。Session 与 owner disposal 会清理陈旧镜像。
 
-原始 `approval/request` 与 `user-questions/request` 是可转发 waterfall。若某个 Agent-scoped Client listener claim，请求直接返回；若所有已投递 Client 都调用 `next()`，原 Cordis waterfall 继续到后续 Host listener。Session control 不保存或重放这些请求。
+原始 `approval/request` 与 `user-questions/request` 是可转发 waterfall。若某个 Agent-scoped Client listener claim，请求直接返回；若所有已投递 Client 都调用 `next()`，原 Cordis waterfall 继续到后续 Host listener。`approval/request` 还让 Host 链与 Client 答复竞速，使两个人类界面都被询问。Session control 不保存或重放这些请求。
 
 projection baseline 与 tail page 的日志切点独立产生，Client 总是保留较高 seq 的值。订阅 live projection 不会为取得值而启动 Agent。
 
@@ -277,11 +277,11 @@ Client 用 `agentId` 同步解析或物化 Agent Context，把当前 delivery si
 
 Client adapter 未注册、resolver 未返回 Context 或解析抛错时，本 Client 立即返回 `next`。它不订阅 registry、不做 resolve 后竞态复查，也不为一次 delivery 创建临时 Fiber。
 
-Gateway Host 为每个未完成 waterfall 保存 `eventId`、Host continuation 与已投递 Client generation。新 Client generation 会收到同一 pending event 的重放。
+Gateway Host 为每个未完成 waterfall 保存 `eventId`、Host continuation 与已投递 Client generation。只要仍有其他已投递 Client，新 Client generation 就会收到同一 pending event 的重放。
 
 每个 generation 的队列保证一次投递，因此 Client 不保存 `seen` 集合。`clientId + eventId` 绑定结果与当前 generation，旧连接的回包不能完成新连接上的 delivery。
 
-多 Client 同时接收 waterfall 时，第一个 result 或 rejection 完成 Host 调用，并向其余 Client 发送 `cancel`。只有所有已投递 Client 都返回 `next` 时，Gateway 才继续原 Cordis chain。
+多 Client 同时接收 waterfall 时，第一个 result 或 rejection 完成 Host 调用，并向其余 Client 发送 `cancel`。只有所有已投递 Client 都返回 `next` 时，Gateway 才继续原 Cordis chain；`approval/request` 例外，它让 Host 链与 Client 答复竞速并撤下落败的 Client 卡片；没有任何可作答 Client 流能结算的事件立即委托（[决定](../bug-fix/2026-11-11-first-decision-wins-approval-surfaces.zh.md)）。
 
 Host caller signal 取消、Agent Context 释放、Client generation 结束和 losing-client cancellation 都会终止对应的等待。
 
@@ -291,7 +291,7 @@ Gateway 只验证 waterfall 返回值能无损表示为 JSON，不解释业务�
 
 `UserQuestionService` 在请求期间观察到调用方 `AbortSignal` 已取消、且 provider 抛出普通错误时，将其归一为 `UserQuestionError` 的 `ASK_ABORTED`，并把原错误保留为 `cause`；provider 已给出的领域错误保持不变。
 
-`$events/result` 失败会令当前 Connection generation 失败。Host 随 generation 撤销该 Client 的 delivery，pending event 在下一 generation 重放，Client 不维护第二套结果重试队列。
+`$events/result` 失败会令当前 Connection generation 失败。Host 随 generation 撤销该 Client 的 delivery；只要仍有其他已投递 Client，pending event 就在下一 generation 重放，否则委托给 Host 链。Client 不维护第二套结果重试队列。
 
 普通 `$on` 通知在断线后不重放。凡正确性依赖恢复的数据必须有 query、cursor 或 opening baseline，不能依赖 Remote Event 恰好送达。
 
@@ -379,7 +379,7 @@ Session 与 Workspace 的 Host API、stream adapter 和 Client 数据模型各�
 
 通用 stream 对象增加了三个明确层级，但删除了每个 Controller 各自复制的 retry、cancel、generation、baseline 和 gap-repair 外壳。
 
-Remote waterfall 保留多 Client 首个 claim、全体 `next` 后继续 Host chain、断线重放 pending 和端到端取消；代价是当前协议只支持一级 Agent scope 与无损 JSON 请求／结果。
+Remote waterfall 保留多 Client 首个 claim、非竞速行在全体 `next` 后继续 Host chain、`approval/request` 的 Host 竞速、仍有投递者时断线重放 pending、没有可作答 Client 时立即委托和端到端取消；代价是当前协议只支持一级 Agent scope 与无损 JSON 请求／结果。
 
 本决定扩展[Remote 事件投递](../../../../packages/api/remotes/README.zh.md)的 allowlist 与单一 Cordis 签名设计：普通通知继续使用 `emit`，Agent-scoped async waterfall 使用同一 `ctx.remote.$on` 面和显式 `waterfall` mode；不建立第二套 invocation map。
 

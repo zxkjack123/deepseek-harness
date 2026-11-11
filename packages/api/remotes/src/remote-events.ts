@@ -17,6 +17,19 @@ import type { TypertForwardableEventEntry } from '@deepseek-ai/dsh-typert-protoc
 import type {} from '@deepseek-ai/dsh-web/types'
 
 /**
+ * Allowlist entry. A waterfall row may race its forwarded Client answer
+ * against the Host chain; `hostAbsentValue` then names the value the Host
+ * chain settles with when it composed no in-process answerer.
+ */
+type ApiRemoteForwardedEventEntry<Entry = TypertForwardableEventEntry> =
+  Entry extends { readonly mode: 'waterfall' }
+    ? Entry & {
+      readonly raceWithHost?: true
+      readonly hostAbsentValue?: unknown
+    }
+    : Entry
+
+/**
  * Host events this application forwards without renaming. The explicit mode is
  * both the Host dispatch strategy and the legal key set of `ctx.remote.$on`.
  * An `emit` entry declares readers of the resources its payload carries, or
@@ -26,7 +39,7 @@ import type {} from '@deepseek-ai/dsh-web/types'
  */
 export const API_REMOTE_FORWARDED_EVENTS = [
   { event: 'agent-preset/selected', mode: 'emit' },
-  { event: 'approval/request', mode: 'waterfall' },
+  { event: 'approval/request', mode: 'waterfall', raceWithHost: true, hostAbsentValue: 'unavailable' },
   { event: 'api-session/activity', mode: 'emit', resources: { session: (sessionId): SessionId => sessionId } },
   { event: 'api-session/added', mode: 'emit', resources: { session: (summary): SessionId => summary.sessionId } },
   { event: 'api-session/error', mode: 'emit', resources: { session: (sessionId): SessionId => sessionId } },
@@ -56,4 +69,4 @@ export const API_REMOTE_FORWARDED_EVENTS = [
   { event: 'schedule/changed', mode: 'emit' },
   { event: 'user-questions/request', mode: 'waterfall' },
   { event: 'web/providers-changed', mode: 'emit' },
-] as const satisfies readonly TypertForwardableEventEntry[]
+] as const satisfies readonly ApiRemoteForwardedEventEntry[]

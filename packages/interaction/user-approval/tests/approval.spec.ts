@@ -87,7 +87,7 @@ describe('ApprovalService.request', () => {
     expect(Object.keys(appended[0]?.data ?? {}).sort()).toEqual(['id', 'toolName'])
   })
 
-  it('borrows the exact readonly request for scoped dispatch and audit', async () => {
+  it('projects the readonly request fields with a request-scoped signal for scoped dispatch', async () => {
     const ctx = await mounted()
     const { agent, appended } = fakeAgent(ctx)
     let scope!: Scope
@@ -109,7 +109,15 @@ describe('ApprovalService.request', () => {
 
     await expect(ctx.approval.request(request)).resolves.toBe('allowed-once')
     expect(carrier).toBe(agent)
-    expect(received).toBe(request)
+    expect(received).toMatchObject({
+      agent,
+      toolName: 'scoped-tool',
+      callId: 'scoped-call',
+      reason: 'scoped reason',
+    })
+    expect(received).not.toBe(request)
+    expect(received?.signal).toBeInstanceOf(AbortSignal)
+    expect(received?.signal?.aborted).toBe(true)
     expect(appended).toHaveLength(2)
     expect(appended[0]?.data).toMatchObject({
       toolName: 'scoped-tool',
@@ -324,6 +332,45 @@ describe('ApprovalService.request', () => {
     const controller = new AbortController()
 
     await expect(ctx.approval.request(requestOf(agent, { signal: controller.signal }))).resolves.toBe('rejected')
+  })
+
+  it('withdraws the dispatched signal after another answerer decides', async () => {
+    const ctx = await mounted()
+    const { agent } = fakeAgent(ctx)
+    let parked: AbortSignal | undefined
+    ctx.on('approval/request', async (_request, next) => {
+      void next()
+      return 'allowed-once'
+    })
+    ctx.on('approval/request', (request) => {
+      parked = request.signal
+      return new Promise<ApprovalOutcome>(() => {})
+    })
+
+    await expect(ctx.approval.request(requestOf(agent))).resolves.toBe('allowed-once')
+    expect(parked?.aborted).toBe(true)
+    expect(parked?.reason).toBeInstanceOf(Error)
+    expect((parked?.reason as Error).message).toBe('approval request settled')
+  })
+
+  it('propagates caller cancellation to the dispatched signal', async () => {
+    const ctx = await mounted()
+    const { agent } = fakeAgent(ctx)
+    let parked: AbortSignal | undefined
+    ctx.on('approval/request', (request) => {
+      parked = request.signal
+      return new Promise<ApprovalOutcome>(() => {})
+    })
+    const controller = new AbortController()
+    const reason = new Error('caller withdrew')
+
+    const pending = ctx.approval.request(requestOf(agent, { signal: controller.signal }))
+    await vi.waitFor(() => { expect(parked).toBeDefined() })
+    controller.abort(reason)
+
+    await expect(pending).resolves.toBe('cancelled')
+    expect(parked?.aborted).toBe(true)
+    expect(parked?.reason).toBe(reason)
   })
 
   it('issues a fresh id per request', async () => {

@@ -120,7 +120,7 @@ describe('viewer forwarded interactions', () => {
       yield {
         event: 'approval/request', request: { agent: subject, reason: 'private owner operation' },
         context: { value: ctx, subject, agentId: 'private-owner-agent' },
-        resolve: outcome.resolve, reject: outcome.reject,
+        resolve: outcome.resolve, reject: outcome.reject, dismiss: () => {},
       }
       queued.resolve(undefined)
       await new Promise<void>((resolve) => {

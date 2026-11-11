@@ -36,14 +36,14 @@
   en: 4de2965717900b96
   zh: 1d129003824fa6bd
 /agent-note-session-history-control-state-and-remote-event-transport/decision/session-controller/session-live-control:
-  en: a11d627cd68650c3
-  zh: 9aff565b9f712853
+  en: 93c7d8e66b2ac544
+  zh: 951acd9d85af8bb8
 /agent-note-session-history-control-state-and-remote-event-transport/decision/workspace-controller:
   en: ce0c3fcff169412d
   zh: 7076182817358dff
 /agent-note-session-history-control-state-and-remote-event-transport/decision/remote-event:
-  en: c76291bf39999882
-  zh: 76f032664fb91ead
+  en: 855e6d474c808120
+  zh: 7f099e82f12d9b36
 /agent-note-session-history-control-state-and-remote-event-transport/decision/api-proxy-s-remaining-boundary:
   en: 457408013eb78636
   zh: 126e9d263225d7c4
@@ -54,5 +54,5 @@
   en: 7328f28ba3e32f4c
   zh: 2150f20437a473af
 /agent-note-session-history-control-state-and-remote-event-transport/consequences:
-  en: 7e130587088a18c5
-  zh: 5a7a02049aa74a5b
+  en: 0a0c000967f60635
+  zh: 1001ec38b15c058a

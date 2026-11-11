@@ -740,6 +740,7 @@ describe('Gateway forwarded events for non-owner Peers', () => {
       context: { value: agentCtx, subject, agentId: 'agent-1' },
       resolve: settled,
       reject: settled,
+      dismiss: () => {},
     })
     const resources = { 'test-shelf': (shelfId: unknown) => shelfId }
     push({ event: 'fixture/notice', args: ['hello'] })

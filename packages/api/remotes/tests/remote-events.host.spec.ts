@@ -1,12 +1,18 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { Fiber } from '@deepseek-ai/cordis'
+import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import type {
   RemoteEventHostInfo,
   TypertRemoteEventInvocation,
   TypertRemoteEventSource,
 } from '@deepseek-ai/dsh-api-gateway'
+import RemoteAccessService from '@deepseek-ai/dsh-api-remote-access'
+import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
+import WebServer from '@deepseek-ai/dsh-host-webserver'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
-import { describe, expect, it } from 'vitest'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply, inject } from '../src/index.ts'
 
 interface GatewayProbe {
@@ -304,3 +310,320 @@ describe('Remote event Host source', () => {
     await ctx.fiber.dispose()
   })
 })
+
+describe('Remote event waterfall across the composed Gateway', () => {
+  it('asks the Client and the Host answerer, and a Host decision dismisses the Client card', async () => {
+    const host = await composed()
+    const client = await openEventStream(host.ctx)
+    const agent = { id: 'agent-host-wins', ctx: host.ctx.extend() }
+    const asked: object[] = []
+    host.ctx.on('approval/request', (request) => {
+      asked.push(request)
+      return Promise.resolve<ApprovalOutcome>('rejected')
+    })
+
+    const pending = waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'approval/request',
+      [{ prompt: 'ship', agent }],
+      () => Promise.resolve<ApprovalOutcome>('unavailable'),
+    )
+
+    await expect(pending).resolves.toBe('rejected')
+    expect(asked).toHaveLength(1)
+    await vi.waitFor(() => {
+      const frames = client.frames()
+      const delivered = frames.find(frame => frame.type === 'waterfall')
+      expect(delivered).toBeDefined()
+      expect(frames).toContainEqual({ type: 'cancel', eventId: delivered?.eventId })
+    })
+    await client.stop()
+  })
+
+  it('lets an early Client answer win while the Host answerer stays pending', async () => {
+    const host = await composed()
+    const client = await openEventStream(host.ctx)
+    const agent = { id: 'agent-client-wins', ctx: host.ctx.extend() }
+    const asked = vi.fn((): Promise<ApprovalOutcome> => new Promise<ApprovalOutcome>(() => {}))
+    host.ctx.on('approval/request', asked)
+
+    const pending = waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'approval/request',
+      [{ prompt: 'ship', agent }],
+      () => Promise.resolve<ApprovalOutcome>('unavailable'),
+    )
+    let delivered: Record<string, unknown> | undefined
+    await vi.waitFor(() => {
+      delivered = client.frames().find(frame => frame.type === 'waterfall')
+      expect(delivered).toBeDefined()
+    })
+    expect(asked).toHaveBeenCalledTimes(1)
+
+    await sendEventResult(host, client.clientId, String(delivered?.eventId), {
+      kind: 'result',
+      value: 'allowed-once',
+    })
+
+    await expect(pending).resolves.toBe('allowed-once')
+    await client.stop()
+  })
+
+  it('keeps a late Client answer in the race after the Host chain rejects', async () => {
+    const host = await composed()
+    const client = await openEventStream(host.ctx)
+    const agent = { id: 'agent-late-client', ctx: host.ctx.extend() }
+    host.ctx.on('approval/request', () => Promise.reject(new Error('the Host answerer failed')))
+
+    const pending = waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'approval/request',
+      [{ prompt: 'ship', agent }],
+      () => Promise.resolve<ApprovalOutcome>('unavailable'),
+    )
+    let delivered: Record<string, unknown> | undefined
+    await vi.waitFor(() => {
+      delivered = client.frames().find(frame => frame.type === 'waterfall')
+      expect(delivered).toBeDefined()
+    })
+
+    await sendEventResult(host, client.clientId, String(delivered?.eventId), {
+      kind: 'result',
+      value: 'allowed-once',
+    })
+    await expect(pending).resolves.toBe('allowed-once')
+    await client.stop()
+  })
+
+  it('delegates a Client next() to the still-pending Host answerer', async () => {
+    const host = await composed()
+    const client = await openEventStream(host.ctx)
+    const agent = { id: 'agent-delegated', ctx: host.ctx.extend() }
+    const answer = Promise.withResolvers<ApprovalOutcome>()
+    host.ctx.on('approval/request', () => answer.promise)
+
+    const pending = waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'approval/request',
+      [{ prompt: 'ship', agent }],
+      () => Promise.resolve<ApprovalOutcome>('unavailable'),
+    )
+    let delivered: Record<string, unknown> | undefined
+    await vi.waitFor(() => {
+      delivered = client.frames().find(frame => frame.type === 'waterfall')
+      expect(delivered).toBeDefined()
+    })
+
+    await sendEventResult(host, client.clientId, String(delivered?.eventId), { kind: 'next' })
+    answer.resolve('rejected')
+    await expect(pending).resolves.toBe('rejected')
+    await client.stop()
+  })
+
+  it('does not ask the Host chain when the Gateway rejects the invocation', async () => {
+    const host = await composed()
+    await openEventStream(host.ctx)
+    const agent = { id: 'agent-rejected-request', ctx: host.ctx.extend() }
+    const asked = vi.fn((): Promise<never> => new Promise<never>(() => {}))
+    host.ctx.on('approval/request', asked)
+
+    await expect(waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'approval/request',
+      [{ prompt: 'ship', agent, notJson: 1n }],
+      () => Promise.resolve<ApprovalOutcome>('unavailable'),
+    )).rejects.toThrow('not lossless JSON data')
+    expect(asked).not.toHaveBeenCalled()
+  })
+
+  it('asks the Host answerer when no Client stream is connected', async () => {
+    const host = await composed()
+    const agent = { id: 'agent-no-client', ctx: host.ctx.extend() }
+    const asked = vi.fn((): Promise<ApprovalOutcome> => Promise.resolve('allowed-once'))
+    host.ctx.on('approval/request', asked)
+
+    await expect(waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'approval/request',
+      [{ prompt: 'ship', agent }],
+      () => Promise.resolve<ApprovalOutcome>('unavailable'),
+    )).resolves.toBe('allowed-once')
+    expect(asked).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns the declared no-answerer value while delegating exactly once', async () => {
+    const host = await composed()
+    const agent = { id: 'agent-no-answerer', ctx: host.ctx.extend() }
+    let delegated = 0
+
+    await expect(waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'approval/request',
+      [{ prompt: 'ship', agent }],
+      () => {
+        delegated += 1
+        return Promise.resolve<ApprovalOutcome>('unavailable')
+      },
+    )).resolves.toBe('unavailable')
+    expect(delegated).toBe(1)
+  })
+
+  it('keeps user-questions on the Client-first path without asking the Host chain', async () => {
+    const host = await composed()
+    const client = await openEventStream(host.ctx)
+    const agent = { id: 'agent-questions', ctx: host.ctx.extend() }
+    const asked = vi.fn((): Promise<never> => new Promise<never>(() => {}))
+    host.ctx.on('user-questions/request', asked)
+
+    const pending = waterfallRaw(
+      host.ctx,
+      scopeTarget(host.ctx, agent),
+      'user-questions/request',
+      [{ questions: [], agent }],
+      () => Promise.resolve({ answers: [] }),
+    )
+    let delivered: Record<string, unknown> | undefined
+    await vi.waitFor(() => {
+      delivered = client.frames().find(frame => frame.type === 'waterfall')
+      expect(delivered).toBeDefined()
+    })
+    expect(asked).not.toHaveBeenCalled()
+
+    await sendEventResult(host, client.clientId, String(delivered?.eventId), {
+      kind: 'result',
+      value: { answers: [] },
+    })
+    await expect(pending).resolves.toEqual({ answers: [] })
+    expect(asked).not.toHaveBeenCalled()
+    await client.stop()
+  })
+})
+
+interface ComposedHost {
+  readonly ctx: Context
+  readonly origin: string
+  readonly cookie: string
+}
+
+const composedHosts: Context[] = []
+afterEach(async () => {
+  await Promise.all(composedHosts.splice(0).map(ctx => ctx.fiber.dispose()))
+})
+
+async function composed(): Promise<ComposedHost> {
+  const ctx = new Context()
+  composedHosts.push(ctx)
+  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+  provideBrowserCredentials(ctx)
+  await ctx.plugin(TypertRegistry)
+  await ctx.plugin(RemoteAccessService)
+  await ctx.plugin(TypertGatewayService)
+  await ctx.plugin({ inject: [...connectionInject], apply: applyConnection })
+  await ctx.plugin({ inject: [...inject], apply })
+  return { ctx, origin: `http://127.0.0.1:${String(ctx.webServer.port)}`, cookie: browserCookie(ctx) }
+}
+
+interface InProcessEventClient {
+  readonly clientId: string
+  readonly frames: () => readonly Record<string, unknown>[]
+  readonly stop: () => Promise<void>
+}
+
+async function openEventStream(ctx: Context): Promise<InProcessEventClient> {
+  const abort = new AbortController()
+  const empty = (async function* () {})()
+  const stream = await ctx.typertGateway.wireStream.open(
+    '$events', { args: {} }, empty, ctx.connection.browserPeer, abort.signal,
+  )
+  const iterator = stream[Symbol.asyncIterator]()
+  const first = await iterator.next()
+  if (first.done === true) throw new Error('fixture event stream ended before its ready frame')
+  const ready: unknown = first.value
+  if (!isRecord(ready)) throw new Error('fixture event stream did not open with a frame')
+  const clientId = ready['clientId']
+  if (ready['type'] !== 'ready' || typeof clientId !== 'string') {
+    throw new Error('fixture event stream did not open with a ready frame')
+  }
+  const frames: Record<string, unknown>[] = []
+  const pump = (async () => {
+    for (;;) {
+      const next = await iterator.next()
+      if (next.done === true) return
+      if (isRecord(next.value)) frames.push(next.value)
+    }
+  })()
+  return {
+    clientId,
+    frames: () => frames,
+    stop: async () => {
+      abort.abort(new Error('fixture event stream closed'))
+      await pump
+    },
+  }
+}
+
+async function sendEventResult(
+  host: ComposedHost,
+  clientId: string,
+  eventId: string,
+  outcome: { readonly kind: 'next' } | { readonly kind: 'result'; readonly value?: unknown },
+): Promise<void> {
+  const response = await fetch(`${host.origin}/api/$events/result`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: host.cookie },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: `fixture-${eventId}`,
+      method: '$events/result',
+      payload: { args: { clientId, eventId, outcome } },
+    }),
+  })
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    readonly result?: { readonly ok?: boolean; readonly error?: { readonly message?: string } }
+  }
+  if (body.result?.ok !== true) throw new Error(body.result?.error?.message ?? 'fixture event result failed')
+}
+
+/** Narrow one frame value to a record of its fields. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function provideBrowserCredentials(ctx: Context): void {
+  const records = new Map<unknown, unknown>()
+  ctx.provide('credentials', {
+    async modifyRecord(
+      key: unknown,
+      mutate: (current: unknown) => Promise<unknown>,
+    ): Promise<unknown> {
+      const current = records.get(key)
+      const next = await mutate(current)
+      if (next !== undefined) records.set(key, next)
+      return next ?? current
+    },
+  } as never)
+}
+
+function browserCookie(ctx: Context): string {
+  const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
+  const target = new URL(ctx.connection.authenticatedUrl(origin))
+  let setCookie: string | undefined
+  ctx.connection.authorizeIndex({
+    method: 'GET',
+    url: `${target.pathname}${target.search}`,
+    headers: { host: target.host },
+  }, {
+    writeHead(_status: number, headers?: Record<string, string>) { setCookie = headers?.['set-cookie'] },
+    end() {},
+  })
+  if (setCookie === undefined) throw new Error('fixture did not receive a browser cookie')
+  return setCookie.split(';', 1)[0] as string
+}

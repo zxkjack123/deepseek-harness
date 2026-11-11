@@ -223,7 +223,9 @@ export class ApprovalService extends Service {
 
   /**
    * Ask the composed answerers to decide one readonly same-process request.
-   * The service borrows the request, agent, session, and live signal directly.
+   * The service reads the request fields, agent, session, and caller signal
+   * directly; answerers receive those fields with a request-scoped signal
+   * composed with the caller's signal.
    * The request requires an open turn because the audit pair must be enclosed
    * by the durable log's commit/replay boundary; an idle ask rejects before
    * appending anything. The answerer phase always produces an outcome: an
@@ -286,6 +288,9 @@ export class ApprovalService extends Service {
 
   /**
    * Dispatch the waterfall, contained and raced against the request signal.
+   * Every answerer receives a request-scoped signal composed with the caller's;
+   * the service aborts it once this request settles so a prompt that observes
+   * only that signal releases when another answerer decides.
    * @param req - the borrowed public request.
    * @param session - the request agent's session used for policy lookup.
    * @returns the normalized closed outcome.
@@ -299,13 +304,20 @@ export class ApprovalService extends Service {
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
     if (this.effectivePolicy(session) === 'never') return 'rejected'
+    // One lifetime per request: an answerer that learns withdrawal only through
+    // the dispatched signal releases its prompt once any surface decides.
+    const lifetime = new AbortController()
+    const dispatched = {
+      ...req,
+      signal: signal === undefined ? lifetime.signal : AbortSignal.any([signal, lifetime.signal]),
+    }
     // Enter the promise chain BEFORE dispatching: a listener that throws
     // SYNCHRONOUSLY (before its first await) must land in the same rejection
     // path as an async one — `Promise.resolve(call())` would let it escape
     // the containment into the caller.
     const answer: Promise<ApprovalOutcome> = Promise.resolve().then(
       () => this.ctx.waterfall(
-        scopeTarget(req.agent, req.agent), 'approval/request', req,
+        scopeTarget(req.agent, req.agent), 'approval/request', dispatched,
         () => Promise.resolve<ApprovalOutcome>('unavailable'),
       ),
     ).then(
@@ -316,20 +328,27 @@ export class ApprovalService extends Service {
       // tool call open — the seam contains its callbacks.
       () => 'unavailable',
     )
-    if (signal === undefined) return answer
-    return await new Promise<ApprovalOutcome>((resolve) => {
-      const onAbort = () => {
-        signal.removeEventListener('abort', onAbort)
-        resolve('cancelled')
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-      void answer.then((outcome) => {
-        signal.removeEventListener('abort', onAbort)
-        // After an abort won the race this resolve is a settled-promise no-op:
-        // the late answer is discarded by construction.
-        resolve(outcome)
+    const withdraw = signal === undefined
+      ? answer
+      : new Promise<ApprovalOutcome>((resolve) => {
+        const onAbort = () => {
+          signal.removeEventListener('abort', onAbort)
+          resolve('cancelled')
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        void answer.then((outcome) => {
+          signal.removeEventListener('abort', onAbort)
+          // After an abort won the race this resolve is a settled-promise no-op:
+          // the late answer is discarded by construction.
+          resolve(outcome)
+        })
       })
-    })
+    try {
+      return await withdraw
+    } finally {
+      // The structured reason keeps a late withdrawal distinct from caller cancellation.
+      lifetime.abort(new Error('approval request settled'))
+    }
   }
 }
 
