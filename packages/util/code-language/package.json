@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-util-code-language",
   "description": "Single file-extension to syntax-highlighting language table shared by Client code surfaces and the Host read card",
-  "version": "0.2.2-rc.2-local.3b0f1dc",
+  "version": "0.2.2-rc.2-local.b256609",
   "publishConfig": {
     "access": "public"
   },

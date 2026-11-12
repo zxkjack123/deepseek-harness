@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-experimental-forge-bundle",
   "description": "Experimental change request panel and worktree option for Sessions in Git repositories",
-  "version": "0.2.2-rc.2-local.3b0f1dc",
+  "version": "0.2.2-rc.2-local.b256609",
   "icon": "./icon.svg",
   "publishConfig": {
     "access": "public"
