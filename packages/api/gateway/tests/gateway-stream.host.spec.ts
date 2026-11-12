@@ -1605,6 +1605,75 @@ describe('Typert Remote streams', () => {
     await unregister()
   })
 
+  it('settles a pending waterfall when the answer carries a superseded Client identity', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: null })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const client = await openEventClient(ctx, 'events-stale-identity')
+    const pending = pendingInvocation(ctx.extend(), undefined, 'stale', agentId('agent-stale'))
+
+    source.push(pending.dispatch)
+    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
+    // The page reconnects between the ask and the answer, so the recorded Client id no longer
+    // resolves; the decision still belongs to this owner and the request is still pending.
+    const response = await fetch(`${client.origin}/api/$events/result`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: client.cookie },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'remote-event-result-stale-identity',
+        method: '$events/result',
+        payload: {
+          args: {
+            clientId: 'superseded-client-identity',
+            eventId: deliveredInvocation(client)!.eventId,
+            outcome: { kind: 'result', value: 'allowed' },
+          },
+        },
+      }),
+    })
+    expect(response.status).toBe(200)
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    client.socket.close()
+    await unregister()
+  })
+
+  it('ignores a delegation that carries a superseded Client identity', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: null })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const client = await openEventClient(ctx, 'events-stale-next')
+    const pending = pendingInvocation(ctx.extend(), undefined, 'stale-next', agentId('agent-stale-next'))
+
+    source.push(pending.dispatch)
+    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
+    const response = await fetch(`${client.origin}/api/$events/result`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: client.cookie },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: 'remote-event-result-stale-next',
+        method: '$events/result',
+        payload: {
+          args: {
+            clientId: 'superseded-client-identity',
+            eventId: deliveredInvocation(client)!.eventId,
+            outcome: { kind: 'next' },
+          },
+        },
+      }),
+    })
+    expect(response.status).toBe(200)
+    await new Promise((resolve) => { setTimeout(resolve, 60) })
+    expect(pending.resolve).not.toHaveBeenCalled()
+
+    await sendEventResult(client, deliveredInvocation(client)!, { kind: 'result', value: 'allowed' })
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+    client.socket.close()
+    await unregister()
+  })
+
   it('dismisses a delivered waterfall on every Client without settling its source', async () => {
     const { ctx } = await setup(true)
     const source = new RemoteEventSourceProbe()

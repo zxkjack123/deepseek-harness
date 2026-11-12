@@ -520,11 +520,15 @@ export class TypertGatewayService extends Service implements TypertGateway {
           throw new TypertGatewayError('gateway/invocation-unavailable', endpoint, 'only owner Peers answer forwarded Remote events')
         }
         const result = parseRemoteEventResultPayload(payload)
+        // A Client answer can outlive the stream generation that carried the delivery: the page
+        // reconnects between the ask and the answer, so the recorded client id no longer resolves.
+        // The answer is still the owner's decision for a request that is still pending, so it is
+        // accepted by event id; only an answer that cannot belong to any live stream is refused.
         const client = this.remoteEventClients.get(result.clientId)
-        if (client === undefined) {
+        if (client === undefined && !this.pendingRemoteEvents.has(result.eventId)) {
           throw new Error('typert gateway: Remote event result identifies no active event stream')
         }
-        if (client.peer !== peer) {
+        if (client !== undefined && client.peer !== peer) {
           throw new TypertGatewayError(
             'gateway/interactions-forbidden', endpoint,
             'Remote event result belongs to another Peer',
@@ -733,14 +737,27 @@ export class TypertGatewayService extends Service implements TypertGateway {
   }
 
   private receiveRemoteEventResult(
-    client: RemoteEventClient,
+    client: RemoteEventClient | undefined,
     result: ReturnType<typeof parseRemoteEventResult>,
   ): void {
     const pending = this.pendingRemoteEvents.get(result.eventId)
     // Settlement and Client replacement may race the result request. Results
     // from a completed event or a superseded delivery are idempotent no-ops.
-    if (pending === undefined || !pending.deliveries.has(client)) return
-    this.removeRemoteEventDelivery(pending, client)
+    if (pending === undefined) return
+    const held = client !== undefined && pending.deliveries.has(client)
+    if (!held && result.outcome.kind === 'next') {
+      // Delegation carries no decision, so only a Client that still holds the delivery may
+      // hand the request to the Host chain; a superseded stream has nothing to delegate.
+      return
+    }
+    if (!held) {
+      console.error(
+        '[api-gateway] Remote event answered without a live delivery; accepting the decision:',
+        result.eventId,
+      )
+    } else {
+      this.removeRemoteEventDelivery(pending, client)
+    }
     if (result.outcome.kind === 'result') {
       this.settleRemoteEvent(pending, {
         kind: 'result',
