@@ -32,6 +32,14 @@ A parent that called `subagent` or `send_message` after the notice has already a
 
 **Blocking the turn until the parent calls a specific tool.** Enforcing one required tool would decide the remedy for the parent, which contradicts the menu: checking side effects, re-scoping, re-routing, finishing the work, and recording an explicit abandonment are all legitimate outcomes.
 
+## A child that ends normally without finishing
+
+A stop reason cannot see a child that ran out of its own budget, reported that it could not reproduce the defect, and settled `completed`. The first production case of this guard was exactly that shape: two of five children failed, one by exhausting its context and one by declaring the work undone, and only the first was an abnormal stop reason.
+
+`dsh-subagent` therefore extends its initial result-delivery guidance: a child that cannot finish starts its closing answer with `INCOMPLETE:`. The guard reads that marker on a `completed` settlement and treats it like any other failure. The marker is a protocol word rather than a judgement the manager infers: guessing from prose would classify "INCOMPLETE coverage is the remaining risk" as a failure, and a manager-side classifier would need a model call per settlement. `treatIncompleteMarker: false` restores the stop-reason-only behavior for deployments whose children never see the guidance.
+
+The reminder's action menu names the remedies in the order that matches how these failures are actually recovered: raise the output budget or re-scope, split the task into finer subtasks, re-route once on a different provider, finish the work in the parent, or record the abandonment. Auto-retry stays out for the same reason as above: a child that just burned its budget on one prompt fails the same way on the identical prompt, and a write-capable child may have left side effects the retry would duplicate.
+
 ## Consequences
 
 A parent can no longer end a turn as soon as it acknowledges a failure; it spends at least one more step doing something. Sessions that delegate heavily and lose children to context limits now re-scope or record `[DELEGATION-FAILED: …]` instead of moving on silently. The cost is up to `maxPerTurn` reminder messages per turn, each roughly 120 tokens, plus the extra step each one forces.

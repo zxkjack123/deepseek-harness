@@ -11,6 +11,7 @@ import z from '@deepseek-ai/schemastery'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { INCOMPLETE_MARKER } from '@deepseek-ai/dsh-subagent'
 import type { SubagentSettledMessageSource } from '@deepseek-ai/dsh-subagent'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -48,6 +49,16 @@ const NOTICE_BOILERPLATE: ReadonlySet<string> = new Set([
   'It sent you a message just before finishing, so its closing message is omitted.',
 ])
 
+/**
+ * Fixed sentences `dsh-subagent` inserts between the summary and the child's own
+ * closing text. They carry no child content, so a reader looking for the child's
+ * opening line skips them.
+ */
+const NOTICE_LEAD_IN: ReadonlySet<string> = new Set([
+  'Its closing message:',
+  ...NOTICE_BOILERPLATE,
+])
+
 /** `dsh-subagent` opens every settlement summary with the child's model-facing name. */
 const SETTLEMENT_PREFIX = /^Background subagent (\S+) /u
 
@@ -78,6 +89,13 @@ export interface Config {
    * disables that signal, leaving one reminder per settlement notice.
    */
   dispositionTools?: string[]
+  /**
+   * Read a `completed` settlement as failed when the child opened its closing
+   * answer with `INCOMPLETE:` (default `true`). That marker is how a child
+   * reports a task it could not finish; without it, such a child would settle
+   * exactly like one that succeeded.
+   */
+  treatIncompleteMarker?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -85,6 +103,7 @@ export const Config: z<Config> = z.object({
   maxPerTurn: z.number().default(2),
   detailPreviewChars: z.number().default(500),
   dispositionTools: z.array(z.string()).default(['subagent', 'send_message']),
+  treatIncompleteMarker: z.boolean().default(true),
 })
 
 /** One received abnormal settlement that the parent has not yet handled this turn. */
@@ -95,6 +114,8 @@ interface Failure {
   readonly stopReason: string
   /** Final line of the settlement notice, absent when it carries only boilerplate. */
   readonly detail: string | undefined
+  /** Whether the child settled `completed` while declaring the task unfinished. */
+  readonly declaredIncomplete: boolean
   /** Turn that received the settlement notice. */
   readonly turn: number
   /** Whether this guard already steered a reminder for this settlement. */
@@ -123,14 +144,18 @@ function reminderText(failure: Failure, detailPreviewChars: number): string {
   const detail = failure.detail === undefined
     ? []
     : [`Last line of its settlement notice: ${preview(failure.detail, detailPreviewChars)}`]
+  const opening = failure.declaredIncomplete
+    ? `Subagent "${failure.childName}" ended normally but declared the task unfinished (${INCOMPLETE_MARKER}).`
+    : `Subagent "${failure.childName}" did not finish its task (stopReason: ${failure.stopReason}).`
   return [
-    `Subagent "${failure.childName}" did not finish its task (stopReason: ${failure.stopReason}).`,
+    opening,
     ...detail,
     'A sentence in your reply does not resolve it: act on it now, before this turn ends. '
       + 'In your next step, take one of these actions with a tool:',
     '- If the subagent could have written files, commits, or task-board records, inspect those side effects before deciding to rerun it.',
-    '- max-tokens or a context-limit failure: re-dispatch with a smaller scope. Do not replay the same prompt unchanged; it hits the same ceiling.',
-    '- error: re-dispatch once on a different route — another preset, model, or provider.',
+    '- Output budget or context exhausted: raise the output budget, or re-dispatch with a smaller scope. Do not replay the same prompt unchanged; it hits the same ceiling.',
+    '- The work is too large for one child: split it into finer subtasks and dispatch them separately.',
+    '- The provider failed: re-dispatch once on a different route — another preset, model, or provider.',
     '- Or finish the work yourself.',
     `- If you are abandoning the task, record \`[DELEGATION-FAILED: ${failure.childName} - <reason>]\` in your reply so the failure stays visible.`,
   ].join('\n')
@@ -153,11 +178,31 @@ function preview(text: string, cap: number): string {
  * @param content - the settlement notice's model-visible blocks.
  * @returns that line, or undefined when the notice carries no detail.
  */
-function noticeDetail(content: readonly ContentBlock[]): string | undefined {
+function closingText(content: readonly ContentBlock[]): string[] {
   // The first text block is the summary the source already carries.
-  const rest = content.flatMap(block => block.type === 'text' ? [block.text] : []).slice(1)
+  return content.flatMap(block => block.type === 'text' ? [block.text] : []).slice(1)
+}
+
+/**
+ * Read the final line of a settlement notice, which is the manager's diagnostic
+ * whenever it recorded one.
+ * @param content - the settlement notice's model-visible blocks.
+ * @returns that line, or undefined when the notice carries no detail.
+ */
+function noticeDetail(content: readonly ContentBlock[]): string | undefined {
+  const rest = closingText(content)
   const last = rest.pop()
   return last === undefined || NOTICE_BOILERPLATE.has(last) ? undefined : last
+}
+
+/**
+ * Whether the child opened its closing answer with {@link INCOMPLETE_MARKER}.
+ * @param content - the settlement notice's model-visible blocks.
+ * @returns true when the child declared the task unfinished.
+ */
+function declaresIncomplete(content: readonly ContentBlock[]): boolean {
+  const opening = closingText(content).find(text => !NOTICE_LEAD_IN.has(text))
+  return opening !== undefined && opening.trimStart().startsWith(INCOMPLETE_MARKER)
 }
 
 /**
@@ -198,6 +243,7 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('child-failure-reminder: `dispositionTools` must not contain an empty tool name')
   }
   const dispositionNames = new Set(dispositionTools)
+  const treatIncompleteMarker = config.treatIncompleteMarker as boolean
 
   const states = new WeakMap<Session, SessionState>()
 
@@ -238,12 +284,19 @@ export function apply(ctx: Context, config: Config): void {
         if (source.kind !== 'subagent-settled') return
         // A notice written before stop reasons were recorded cannot be classified.
         const stopReason = source.stopReason
-        if (stopReason === undefined || !abnormal(stopReason)) return
+        if (stopReason === undefined) return
+        // A child that ends normally while declaring the task unfinished settles
+        // exactly like a successful one, so the marker is the only signal.
+        const declaredIncomplete = stopReason === NORMAL_STOP_REASON
+          && treatIncompleteMarker
+          && declaresIncomplete(event.data.content)
+        if (!declaredIncomplete && !abnormal(stopReason)) return
         const state = stateOf(session)
         state.failures.push({
           childName: childNameOf(source),
           stopReason,
           detail: noticeDetail(event.data.content),
+          declaredIncomplete,
           turn: state.turn,
           reminded: false,
           dispositioned: false,

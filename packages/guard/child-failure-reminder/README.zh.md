@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-当 agent 把工作委派给可能失败的子代理（上下文溢出、提供方错误、中止或拒绝），而父级必须决定怎么处理、而不是把收尾通知当信息读掉时，挂载本插件。`dsh` base bundle 已经运行它；部署需要不同的压力时，调整下面的提醒预算或异常集合。
+当 agent 把工作委派给可能失败的子代理（上下文溢出、提供方错误、中止、拒绝，或以 `INCOMPLETE:` 开头收尾却正常结束的子代理），而父级必须决定怎么处理、而不是把收尾通知当信息读掉时，挂载本插件。`dsh` base bundle 已经运行它；部署需要不同的压力时，调整下面的提醒预算或异常集合。
 
 ### 何时选择
 
@@ -42,6 +42,7 @@ kind: "package-reference"
     maxPerTurn: 2                                       # reminders steered into one turn
     detailPreviewChars: 500                             # quoted notice detail
     dispositionTools: [subagent, send_message]          # calls that count as handling it
+    treatIncompleteMarker: true                         # read `INCOMPLETE:` closings as failure
 ```
 
 | 字段 | 默认值 | 含义 |
@@ -50,6 +51,7 @@ kind: "package-reference"
 | `maxPerTurn` | `2` | 一个回合内可 steer 的提醒次数；该回合后续的异常收尾保持静默 |
 | `detailPreviewChars` | `500` | 提醒中引用收尾通知最后一行的字符上限 |
 | `dispositionTools` | `[subagent, send_message]` | 收到通知后调用这些工具即算父级已处置；空列表关闭该信号 |
+| `treatIncompleteMarker` | `true` | 子代理以 `INCOMPLETE:` 开头收尾时，把 `completed` 收尾按失败处理 |
 
 非法配置在启动时报错——`stopReasons` 为空、原因或工具名为空字符串，或 `maxPerTurn`/`detailPreviewChars` 不是正整数——绝不静默改变行为。生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-child-failure-reminder)记录了每个可接受取值。
 
@@ -127,8 +129,9 @@ Subagent "<child>" did not finish its task (stopReason: <stopReason>).
 Last line of its settlement notice: <diagnostic>
 A sentence in your reply does not resolve it: act on it now, before this turn ends. In your next step, take one of these actions with a tool:
 - If the subagent could have written files, commits, or task-board records, inspect those side effects before deciding to rerun it.
-- max-tokens or a context-limit failure: re-dispatch with a smaller scope. Do not replay the same prompt unchanged; it hits the same ceiling.
-- error: re-dispatch once on a different route — another preset, model, or provider.
+- Output budget or context exhausted: raise the output budget, or re-dispatch with a smaller scope. Do not replay the same prompt unchanged; it hits the same ceiling.
+- The work is too large for one child: split it into finer subtasks and dispatch them separately.
+- The provider failed: re-dispatch once on a different route — another preset, model, or provider.
 - Or finish the work yourself.
 - If you are abandoning the task, record `[DELEGATION-FAILED: <child> - <reason>]` in your reply so the failure stays visible.
 ```

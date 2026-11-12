@@ -123,6 +123,39 @@ describe('which settlements are abnormal', () => {
     expect(reminders(agent)).toHaveLength(0)
   })
 
+  it('reminds when a completed child declared the task unfinished', async () => {
+    const { agent } = await run([textResponse('ack'), textResponse('ack')], [
+      settlement('worker', {
+        output: [{ type: 'text', text: 'INCOMPLETE: could not reproduce the failure in the time budget.' }],
+        stopReason: 'completed',
+      }),
+    ])
+    const found = reminders(agent)
+    expect(found).toHaveLength(1)
+    expect(found[0]!.text).toContain('Subagent "worker" ended normally but declared the task unfinished (INCOMPLETE:)')
+    expect(found[0]!.text).toContain('could not reproduce the failure')
+  })
+
+  it('reads the marker only at the start of the closing answer', async () => {
+    const { agent } = await run([textResponse('ack')], [
+      settlement('worker', {
+        output: [{ type: 'text', text: 'Done. Nothing is INCOMPLETE: here.' }],
+        stopReason: 'completed',
+      }),
+    ])
+    expect(reminders(agent)).toHaveLength(0)
+  })
+
+  it('stays silent for a declared-incomplete child when the marker is disabled', async () => {
+    const { agent } = await run([textResponse('ack')], [
+      settlement('worker', {
+        output: [{ type: 'text', text: 'INCOMPLETE: nothing done.' }],
+        stopReason: 'completed',
+      }),
+    ], { treatIncompleteMarker: false })
+    expect(reminders(agent)).toHaveLength(0)
+  })
+
   it('ignores a notice that records no stop reason', async () => {
     const notice = createUserMessage({
       content: [{ type: 'text', text: 'Background subagent worker finished.' }],

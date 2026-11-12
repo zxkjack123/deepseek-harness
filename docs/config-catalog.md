@@ -484,7 +484,7 @@ export type Config = LocalConfig
 
 ## `@deepseek-ai/dsh-child-failure-reminder`
 
-- `source`: [`packages/guard/child-failure-reminder/src/index.ts:60`](../packages/guard/child-failure-reminder/src/index.ts)
+- `source`: [`packages/guard/child-failure-reminder/src/index.ts:71`](../packages/guard/child-failure-reminder/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -514,6 +514,13 @@ export interface Config {
    * disables that signal, leaving one reminder per settlement notice.
    */
   dispositionTools?: string[]
+  /**
+   * Read a `completed` settlement as failed when the child opened its closing
+   * answer with `INCOMPLETE:` (default `true`). That marker is how a child
+   * reports a task it could not finish; without it, such a child would settle
+   * exactly like one that succeeded.
+   */
+  treatIncompleteMarker?: boolean
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-child-failure-reminder -->
@@ -3673,7 +3680,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 - `inject`: `workingDirectory` · `sessionProjections`
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:186`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:187`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
 /** Host configuration for continuable subagent capacity. */

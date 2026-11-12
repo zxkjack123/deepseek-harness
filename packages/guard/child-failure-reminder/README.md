@@ -25,7 +25,7 @@ This package makes a parent agent act on a subagent that did not finish its task
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount this plugin when an agent delegates work to subagents that can fail — a context overflow, a provider error, an abort, or a refusal — and the parent must decide what to do about it instead of treating the settlement notice as information. The `dsh` base bundle already runs it; tune the reminder budget or the abnormal set below when a deployment needs different pressure.
+Mount this plugin when an agent delegates work to subagents that can fail — a context overflow, a provider error, an abort, a refusal, or a child that ends normally while opening its closing answer with `INCOMPLETE:` — and the parent must decide what to do about it instead of treating the settlement notice as information. The `dsh` base bundle already runs it; tune the reminder budget or the abnormal set below when a deployment needs different pressure.
 
 ### When to choose it
 
@@ -42,6 +42,7 @@ Mount the plugin with configuration when the defaults do not fit:
     maxPerTurn: 2                                       # reminders steered into one turn
     detailPreviewChars: 500                             # quoted notice detail
     dispositionTools: [subagent, send_message]          # calls that count as handling it
+    treatIncompleteMarker: true                         # read `INCOMPLETE:` closings as failure
 ```
 
 | Field | Default | Meaning |
@@ -50,6 +51,7 @@ Mount the plugin with configuration when the defaults do not fit:
 | `maxPerTurn` | `2` | Reminders the guard may steer into one turn; further abnormal settlements in that turn stay silent |
 | `detailPreviewChars` | `500` | How many characters of the settlement notice's final line a reminder quotes |
 | `dispositionTools` | `[subagent, send_message]` | Tools whose call after a notice counts as the parent handling it; an empty list disables the signal |
+| `treatIncompleteMarker` | `true` | Read a `completed` settlement as failed when the child opened its closing answer with `INCOMPLETE:` |
 
 Invalid configuration fails at startup with a clear error — an empty `stopReasons` list, a blank reason or tool name, or a `maxPerTurn`/`detailPreviewChars` that is not a positive integer — never a silent change of behavior. The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-child-failure-reminder) documents every accepted value.
 
@@ -127,8 +129,9 @@ Subagent "<child>" did not finish its task (stopReason: <stopReason>).
 Last line of its settlement notice: <diagnostic>
 A sentence in your reply does not resolve it: act on it now, before this turn ends. In your next step, take one of these actions with a tool:
 - If the subagent could have written files, commits, or task-board records, inspect those side effects before deciding to rerun it.
-- max-tokens or a context-limit failure: re-dispatch with a smaller scope. Do not replay the same prompt unchanged; it hits the same ceiling.
-- error: re-dispatch once on a different route — another preset, model, or provider.
+- Output budget or context exhausted: raise the output budget, or re-dispatch with a smaller scope. Do not replay the same prompt unchanged; it hits the same ceiling.
+- The work is too large for one child: split it into finer subtasks and dispatch them separately.
+- The provider failed: re-dispatch once on a different route — another preset, model, or provider.
 - Or finish the work yourself.
 - If you are abandoning the task, record `[DELEGATION-FAILED: <child> - <reason>]` in your reply so the failure stays visible.
 ```

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createUserMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { createSettlementMessage } from '../src/continuation-messages.ts'
+import { INCOMPLETE_MARKER, createSettlementMessage, withResultDeliveryGuidance } from '../src/continuation-messages.ts'
 
 const childId = SessionId('settled-child')
 const childName = 'reviewer/checker'
@@ -106,4 +106,14 @@ it('omits the closing text after the child messaged its parent, keeping structur
     { type: 'text', text: 'Structured result: {"answer":42}' },
     { type: 'text', text: 'safe diagnostic' },
   ])
+})
+
+describe('result-delivery guidance', () => {
+  it('tells the child how to report a task it could not finish', () => {
+    const text = withResultDeliveryGuidance([{ type: 'text', text: 'do the task' }])
+      .flatMap(block => block.type === 'text' ? [block.text] : [])
+      .join('\n')
+    expect(text).toContain(INCOMPLETE_MARKER)
+    expect(text).toContain('start that answer with INCOMPLETE:')
+  })
 })

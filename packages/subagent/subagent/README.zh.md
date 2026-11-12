@@ -199,7 +199,7 @@ kind: "package-reference"
 ##### 返回指导
 
 ```markdown
-Your final answer is delivered automatically if your parent is still online. Include the result and relevant evidence in that answer; the parent does not receive your full transcript, tool output, or reasoning. If your last action is a message to your parent, the completion notice omits your final answer; include the result and relevant evidence in that message.
+Your final answer is delivered automatically if your parent is still online. Include the result and relevant evidence in that answer; the parent does not receive your full transcript, tool output, or reasoning. If your last action is a message to your parent, the completion notice omits your final answer; include the result and relevant evidence in that message. When you cannot finish the task, start that answer with INCOMPLETE: and state what you completed and what remains: the parent treats that marker as a failed delegation it must re-dispatch or take over.
 ```
 
 #### Token 影响

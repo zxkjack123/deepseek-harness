@@ -76,6 +76,14 @@ export function createAgentMessage(
 }
 
 /**
+ * Sentinel a child opens its closing answer with when it could not finish the
+ * task it was given. Such a child still settles as `completed`, so a consumer
+ * that must not read that stop reason as success matches this exact marker
+ * instead; `dsh-child-failure-reminder` is the current consumer.
+ */
+export const INCOMPLETE_MARKER = 'INCOMPLETE:'
+
+/**
  * Append automatic result-delivery guidance to a parent-delivered child's initial task.
  * @param prompt - initial model-visible task blocks.
  * @returns task blocks followed by the result-delivery guidance.
@@ -90,7 +98,9 @@ export function withResultDeliveryGuidance(
       text: 'Your final answer is delivered automatically if your '
         + 'parent is still online. Include the result and relevant evidence in that answer; the parent does not '
         + 'receive your full transcript, tool output, or reasoning. If your last action is a message to your '
-        + 'parent, the completion notice omits your final answer; include the result and relevant evidence in that message.',
+        + 'parent, the completion notice omits your final answer; include the result and relevant evidence in that message. '
+        + `When you cannot finish the task, start that answer with ${INCOMPLETE_MARKER} and state what you completed and `
+        + 'what remains: the parent treats that marker as a failed delegation it must re-dispatch or take over.',
     },
   ]
 }
