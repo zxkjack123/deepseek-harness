@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-tool-present",
   "description": "Explicit workspace file delivery declarations for the DeepSeek Harness",
-  "version": "0.2.2-rc.2-local.5309310",
+  "version": "0.2.2-rc.2-local.eb9a85e",
   "publishConfig": {
     "access": "public"
   },
