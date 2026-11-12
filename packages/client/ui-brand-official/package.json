@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-client-ui-brand-official",
   "description": "Official DeepSeek Harness brand artwork and click-triggered home background",
-  "version": "0.2.2-rc.2-local.eb9a85e",
+  "version": "0.2.2-rc.2-local.aaf1a6e",
   "publishConfig": {
     "access": "public"
   },
