@@ -168,16 +168,17 @@ export interface Config {
   /**
    * Milliseconds a forwarded waterfall with no answering Client stream stays pending before the
    * Host chain answers it. Covers a Client that is only briefly away (locked screen, reconnecting
-   * page); `0` delegates immediately. @default 60000
+   * page); `0` delegates immediately; `null` never delegates on absence, so a Client that returns
+   * hours later still receives the request and either side answers it. @default 60000
    */
-  readonly remoteEventFallbackGraceMs?: number
+  readonly remoteEventFallbackGraceMs?: number | null
 }
 
 interface ResolvedConfig extends Config {
   readonly websocketHeartbeatIntervalMs: number
   readonly streamInboxBytes: number
   readonly websocketCompression: 'none' | 'deflate'
-  readonly remoteEventFallbackGraceMs: number
+  readonly remoteEventFallbackGraceMs: number | null
 }
 
 /**
@@ -228,8 +229,10 @@ export class TypertGatewayService extends Service implements TypertGateway {
       .default(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS),
     streamInboxBytes: z.number().step(1).min(1).default(DEFAULT_STREAM_INBOX_BYTES),
     websocketCompression: z.union([z.const('none'), z.const('deflate')]).default('deflate'),
-    remoteEventFallbackGraceMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS)
-      .default(DEFAULT_REMOTE_EVENT_FALLBACK_GRACE_MS),
+    remoteEventFallbackGraceMs: z.union([
+      z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS),
+      z.const(null),
+    ]).default(DEFAULT_REMOTE_EVENT_FALLBACK_GRACE_MS),
   })
 
   /** Carrier adapter shared by the WebSocket mux and local Host transports. */
@@ -241,7 +244,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
 
   private srcClaims: ReadonlySet<string> | undefined
   private remoteEvents: RegisteredRemoteEventSource | undefined
-  private readonly remoteEventFallbackGraceMs: number
+  private readonly remoteEventFallbackGraceMs: number | null
   private readonly remoteEventClients = new Map<RemoteEventClientId, RemoteEventClient>()
   private readonly pendingRemoteEvents = new Map<RemoteEventId, PendingRemoteEvent>()
 
@@ -773,14 +776,18 @@ export class TypertGatewayService extends Service implements TypertGateway {
    */
   private armRemoteEventFallback(pending: PendingRemoteEvent): void {
     this.cancelRemoteEventFallback(pending)
-    if (this.remoteEventFallbackGraceMs === 0) {
+    const grace = this.remoteEventFallbackGraceMs
+    // `null` keeps the request reachable for a Client that is away indefinitely. The Host chain
+    // still holds its own answerer, so the first side that answers settles the event.
+    if (grace === null) return
+    if (grace === 0) {
       this.settleRemoteEvent(pending, { kind: 'next' })
       return
     }
     pending.fallbackTimer = setTimeout(() => {
       pending.fallbackTimer = undefined
       this.settleRemoteEvent(pending, { kind: 'next' })
-    }, this.remoteEventFallbackGraceMs)
+    }, grace)
   }
 
   /**

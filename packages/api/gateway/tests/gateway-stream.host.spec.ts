@@ -1585,6 +1585,26 @@ describe('Typert Remote streams', () => {
     await unregister()
   })
 
+  it('keeps an unanswered waterfall reachable for a Client that arrives when no grace window is set', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: null })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const pending = pendingInvocation(ctx.extend(), undefined, 'unbounded', agentId('agent-unbounded'))
+
+    source.push(pending.dispatch)
+    await new Promise((resolve) => { setTimeout(resolve, 60) })
+    expect(pending.resolve).not.toHaveBeenCalled()
+
+    const late = await openEventClient(ctx, 'events-unbounded-late')
+    await vi.waitFor(() => { expect(deliveredInvocation(late)).toBeDefined() })
+    await sendEventResult(late, deliveredInvocation(late)!, { kind: 'result', value: 'allowed' })
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    expect(pending.reject).not.toHaveBeenCalled()
+    late.socket.close()
+    await unregister()
+  })
+
   it('dismisses a delivered waterfall on every Client without settling its source', async () => {
     const { ctx } = await setup(true)
     const source = new RemoteEventSourceProbe()
