@@ -444,7 +444,7 @@ describe('Typert Remote streams', () => {
     for (const websocketCompression of ['gzip', 'DEFLATE', '', 1]) {
       expect(() => TypertGatewayService.Config({ websocketCompression } as never)).toThrow()
     }
-    for (const remoteEventFallbackGraceMs of [-1, 1.5, MAX_TIMER_DELAY_MS + 1]) {
+    for (const remoteEventFallbackGraceMs of [-2, 1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ remoteEventFallbackGraceMs })).toThrow()
     }
   })
@@ -1585,8 +1585,33 @@ describe('Typert Remote streams', () => {
     await unregister()
   })
 
+  it('keeps a delegated waterfall pending when no grace window is set', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: -1 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const early = await openEventClient(ctx, 'events-delegate-early')
+    const pending = pendingInvocation(ctx.extend(), undefined, 'delegated', agentId('agent-delegated'))
+
+    source.push(pending.dispatch)
+    await vi.waitFor(() => { expect(deliveredInvocation(early)).toBeDefined() })
+    // A reloaded page replays before its plugins attach, so its Client delegates. Without a
+    // deadline that hand-off must not end the request: a later Client still receives it.
+    await sendEventResult(early, deliveredInvocation(early)!, { kind: 'next' })
+    await new Promise((resolve) => { setTimeout(resolve, 40) })
+    expect(pending.resolve).not.toHaveBeenCalled()
+
+    const late = await openEventClient(ctx, 'events-delegate-late')
+    await vi.waitFor(() => { expect(deliveredInvocation(late)).toBeDefined() })
+    await sendEventResult(late, deliveredInvocation(late)!, { kind: 'result', value: 'allowed' })
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    early.socket.close()
+    late.socket.close()
+    await unregister()
+  })
+
   it('keeps an unanswered waterfall reachable for a Client that arrives when no grace window is set', async () => {
-    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: null })
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: -1 })
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const pending = pendingInvocation(ctx.extend(), undefined, 'unbounded', agentId('agent-unbounded'))
@@ -1606,7 +1631,7 @@ describe('Typert Remote streams', () => {
   })
 
   it('settles a pending waterfall when the answer carries a superseded Client identity', async () => {
-    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: null })
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: -1 })
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const client = await openEventClient(ctx, 'events-stale-identity')
@@ -1640,7 +1665,7 @@ describe('Typert Remote streams', () => {
   })
 
   it('ignores a delegation that carries a superseded Client identity', async () => {
-    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: null })
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: -1 })
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const client = await openEventClient(ctx, 'events-stale-next')

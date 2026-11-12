@@ -238,10 +238,11 @@ export interface Config {
   /**
    * Milliseconds a forwarded waterfall with no answering Client stream stays pending before the
    * Host chain answers it. Covers a Client that is only briefly away (locked screen, reconnecting
-   * page); `0` delegates immediately; `null` never delegates on absence, so a Client that returns
-   * hours later still receives the request and either side answers it. @default 60000
+   * page); `0` delegates immediately; a negative value never delegates on absence or on a
+   * delegated answer, so a Client that returns hours later still receives the request and either
+   * side answers it. @default 60000
    */
-  readonly remoteEventFallbackGraceMs?: number | null
+  readonly remoteEventFallbackGraceMs?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->
