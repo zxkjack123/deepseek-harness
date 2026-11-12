@@ -1,0 +1,70 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/guard/child-failure-reminder/README.md
+/:
+  en: a8d93432435b09bd
+  zh: 6899c289ca45b754
+/deepseek-ai-dsh-child-failure-reminder:
+  en: 1267ca2a5d4ce4d3
+  zh: 88fa50d7dcdfa8dc
+/deepseek-ai-dsh-child-failure-reminder/summary:
+  en: 8b957bfed8bf1884
+  zh: 50fd9c7903e0e610
+/deepseek-ai-dsh-child-failure-reminder/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 09388d293f9be9cb
+/deepseek-ai-dsh-child-failure-reminder/use-this-package:
+  en: 76f84811684b58a5
+  zh: 77fa1a6e2d52b4ca
+/deepseek-ai-dsh-child-failure-reminder/use-this-package/when-to-choose-it:
+  en: 55f052e5967d9c3a
+  zh: d0de344e421d8264
+/deepseek-ai-dsh-child-failure-reminder/use-this-package/configuring-the-abnormal-set-and-the-budget:
+  en: 84111e9efbcdee5c
+  zh: 230db72d58ffd411
+/deepseek-ai-dsh-child-failure-reminder/use-this-package/what-you-get:
+  en: 35ee4e996af32c1a
+  zh: 6fc37231fce2549a
+/deepseek-ai-dsh-child-failure-reminder/understand-the-implementation:
+  en: 2dfed1a9afe6a618
+  zh: 2f8e702b170ea2b2
+/deepseek-ai-dsh-child-failure-reminder/understand-the-implementation/design-philosophy:
+  en: 3cb84d1e6353dc34
+  zh: d8280c18ab3f61e9
+/deepseek-ai-dsh-child-failure-reminder/understand-the-implementation/collection-from-settlement-notice-to-pending-failure:
+  en: ed987160c15965e3
+  zh: 76c02931d9e7da5a
+/deepseek-ai-dsh-child-failure-reminder/understand-the-implementation/forcing-the-decision:
+  en: 65d5ab2b035e8a0e
+  zh: 8eb4c5f472cad5ab
+/deepseek-ai-dsh-child-failure-reminder/understand-the-implementation/source-map:
+  en: 638bfbae2a2a29d8
+  zh: 0d04a32da13bb3d9
+/deepseek-ai-dsh-child-failure-reminder/further-exploration:
+  en: 1ff8a1c20c57bac0
+  zh: 403c25b988fb0833
+/deepseek-ai-dsh-child-failure-reminder/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-child-failure-reminder/model-experience/failure-reminder:
+  en: a2b108aad1020c77
+  zh: 7df797095cb4be3a
+/deepseek-ai-dsh-child-failure-reminder/model-experience/failure-reminder/what-the-model-sees:
+  en: dea314e6799749f1
+  zh: 1bc6a0294bbacca5
+/deepseek-ai-dsh-child-failure-reminder/model-experience/failure-reminder/what-the-model-sees/reminder:
+  en: a121c054d284acdc
+  zh: 85611a7f243e9409
+/deepseek-ai-dsh-child-failure-reminder/model-experience/failure-reminder/token-effect:
+  en: bbd9c31f5a07d3d2
+  zh: 3411665d9bbc905e
+/deepseek-ai-dsh-child-failure-reminder/model-experience/failure-reminder/kv-cache-effect:
+  en: f5d5f97a153f7c70
+  zh: 004088df5b54f3ee
+/deepseek-ai-dsh-child-failure-reminder/known-limitations-and-deferred-work:
+  en: 06046655a1671271
+  zh: 12577d0ffec26ba0
+/deepseek-ai-dsh-child-failure-reminder/known-limitations-and-deferred-work/dev-note:
+  en: 423290f12656bf2c
+  zh: 57466c7350db0e79

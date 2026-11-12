@@ -1,0 +1,28 @@
+# Bilingual-pair consistency record for 2026-11-12-child-failure-reminder-source.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-11-12-child-failure-reminder-source.md
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-11-12-child-failure-reminder-source:
+  en: 5f84fd3c5d75297b
+  zh: 963ee769477f04f4
+/2026-11-12-child-failure-reminder-source/summary:
+  en: 3c1a2e911a70958c
+  zh: 5646c72494ddb602
+/2026-11-12-child-failure-reminder-source/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-11-12-child-failure-reminder-source/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-11-12-child-failure-reminder-source/compatibility:
+  en: 3f995bb082b61f21
+  zh: 02e392cbc5377e22
+/2026-11-12-child-failure-reminder-source/verification:
+  en: 21177782ecbd4f5c
+  zh: 54cb6ed8c9990a4a
+/2026-11-12-child-failure-reminder-source/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

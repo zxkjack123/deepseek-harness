@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Rappel d’échec de sous-agent",
+    "description": "Maintient le tour de l’agent parent ouvert jusqu’à ce qu’un sous-agent terminé anormalement soit traité."
+  }
+}

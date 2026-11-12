@@ -229,6 +229,8 @@ interface SubagentSettledMessageSource {
 }
 ```
 
+A settlement notice's `stopReason` decides whether the parent still owes work: every reason except `completed` means the child did not finish. [`@deepseek-ai/dsh-child-failure-reminder`](../../packages/guard/child-failure-reminder/README.md) reads those notices from the parent's own log and, at the turn-stop boundary, steers one reminder naming the child, its stop reason, and the actions that resolve it, so a turn cannot close while an abnormal settlement it received is unhandled. The pressure is bounded per settlement and per turn.
+
 ```ts type-equiv
 /** Options for one model-authored message within a subagent tree. */
 interface SubagentSendMessageOptions {

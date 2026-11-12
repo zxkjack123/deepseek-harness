@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Recordatorio de subagente fallido",
+    "description": "Mantiene abierto el turno del agente principal hasta que se atienda un subagente terminado de forma anómala."
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "child-failure-reminder",
+    "description": "Keep the parent agent's turn open until an abnormally finished subagent is handled."
+  }
+}

@@ -479,6 +479,45 @@ export type Config = LocalConfig
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-bash-sandbox -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-child-failure-reminder -->
+<a id="deepseek-aidsh-child-failure-reminder"></a>
+
+## `@deepseek-ai/dsh-child-failure-reminder`
+
+- `source`: [`packages/guard/child-failure-reminder/src/index.ts:60`](../packages/guard/child-failure-reminder/src/index.ts)
+
+```ts config-catalog
+/**
+ * Plugin config, validated by the same-named schemastery schema plus the
+ * load-time checks in `apply` (misconfiguration fails loud: an empty
+ * `stopReasons` list, a non-positive `maxPerTurn` or `detailPreviewChars`, or a
+ * blank tool name throws at plugin load, never a silent fall-back).
+ */
+export interface Config {
+  /**
+   * Stop reasons treated as abnormal, i.e. as an unfinished task that the
+   * parent must handle. Defaults to every known reason except `completed`; a
+   * reason this build cannot name is abnormal regardless of this list.
+   */
+  stopReasons?: string[]
+  /** Reminders the guard may steer into one turn (default `2`); further abnormal settlements in that turn stay silent. */
+  maxPerTurn?: number
+  /**
+   * Maximum characters of the settlement notice's final line quoted in a
+   * reminder (default 500). A diagnostic is `dsh-subagent`'s error code plus
+   * message chain, so the cap bounds the reminder without hiding the cause.
+   */
+  detailPreviewChars?: number
+  /**
+   * Tool names whose call after a settlement notice counts as the parent
+   * handling it (default `['subagent', 'send_message']`). An empty list
+   * disables that signal, leaving one reminder per settlement notice.
+   */
+  dispositionTools?: string[]
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-child-failure-reminder -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-client-connection -->
 <a id="deepseek-aidsh-client-connection"></a>
 

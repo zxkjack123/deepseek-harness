@@ -229,6 +229,8 @@ interface SubagentSettledMessageSource {
 }
 ```
 
+收尾通知的 `stopReason` 决定父级是否还欠工作：除 `completed` 之外的每个原因都表示子代理没有完成任务。[`@deepseek-ai/dsh-child-failure-reminder`](../../packages/guard/child-failure-reminder/README.zh.md) 从父级自己的日志中读取这些通知，并在回合收尾边界 steer 一条提醒，点名子代理、它的收尾原因以及能了结这次失败的动作，因此只要收到过的异常收尾尚未处置，回合就无法关闭。施压次数按每条收尾和按回合都有上限。
+
 ```ts type-equiv
 /** Options for one model-authored message within a subagent tree. */
 interface SubagentSendMessageOptions {

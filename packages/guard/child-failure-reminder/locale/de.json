@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Erinnerung an fehlgeschlagene Unteragenten",
+    "description": "Hält den Zug des übergeordneten Agenten offen, bis ein abnormal beendeter Unteragent behandelt ist."
+  }
+}

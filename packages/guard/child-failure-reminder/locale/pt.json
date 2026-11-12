@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Lembrete de subagente com falha",
+    "description": "Mantém o turno do agente principal aberto até que um subagente encerrado de forma anormal seja tratado."
+  }
+}
