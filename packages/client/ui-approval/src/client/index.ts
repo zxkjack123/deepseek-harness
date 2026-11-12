@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ComposerChainProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { PendingInteractionPublisher } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { TypertClientEventListener } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
@@ -23,6 +24,13 @@ export type {
 } from './contract/slots.ts'
 export type { ApprovalKey } from './locales.ts'
 
+declare module '@deepseek-ai/dsh-api-session-controller/client' {
+  interface SessionReferenceSourceMap {
+    /** An approval card holding its Session generation until the user answers or its request ends. */
+    approval: unknown
+  }
+}
+
 /** Required services: Agent scopes, Remote Events, Session UI, Slot registry, and copy. */
 export const inject = ['sessions', 'remote', 'uiSession', 'slots', 'locale']
 
@@ -33,7 +41,38 @@ type ClientApprovalRequest = Parameters<ApprovalListener>[0]
 type ClientApprovalNext = Parameters<ApprovalListener>[1]
 type ClientApprovalOutcome = Awaited<ReturnType<ApprovalListener>>
 
+/** One resolved approval home: the Session identity plus a generation retained for this request. */
+interface ApprovalScope {
+  readonly sessionId: SessionId
+  /** Releases a generation materialized here; absent when the dispatch subject already carried one. */
+  readonly release: (() => void) | undefined
+}
+
 /* jscpd:ignore-start -- Approval and Question intentionally mirror one Remote waterfall lifecycle. */
+/**
+ * Resolve the Session an approval card belongs to instead of dropping a request whose dispatch
+ * subject carries no Agent tag. The transport resolves tagged subjects already; an untagged one
+ * still names the Agent it answers for, and retaining that identity materializes its generation.
+ * @param ctx - Client root context.
+ * @param owner - context the forwarded waterfall dispatched on.
+ * @param request - forwarded approval request.
+ * @returns the Session and an optional retained generation, or undefined without a reachable Agent identity.
+ */
+function resolveApprovalScope(
+  ctx: ClientContext,
+  owner: ClientContext,
+  request: ClientApprovalRequest,
+): ApprovalScope | undefined {
+  const dispatched = ctx.sessions.scopeOf(owner)
+  if (dispatched !== undefined) return { sessionId: dispatched, release: undefined }
+  // The request names the Agent this waterfall answers for, so a transport that projects that
+  // Agent without tagging the dispatch subject still resolves through it.
+  const projected = ctx.sessions.scopeOf(request.agent)
+  if (projected === undefined) return undefined
+  const reference = ctx.sessions.retain(projected, { source: 'approval' })
+  return { sessionId: reference.sessionId, release: () => { reference.release() } }
+}
+
 /** Present one request until the user answers or its lifetime ends. */
 async function answerApproval(
   ctx: ClientContext,
@@ -42,9 +81,15 @@ async function answerApproval(
   next: ClientApprovalNext,
   registerPendingInteraction: PendingInteractionPublisher<PendingApproval>,
 ): Promise<ClientApprovalOutcome> {
-  const sessionId = ctx.sessions.scopeOf(owner)
-  if (sessionId === undefined) return next()
-  const pending = new PendingApproval(sessionId, {
+  const scope = resolveApprovalScope(ctx, owner, request)
+  if (scope === undefined) {
+    console.error(
+      '[ui-approval] approval request reached no Agent scope; delegating to the Host chain:',
+      request.toolName,
+    )
+    return next()
+  }
+  const pending = new PendingApproval(scope.sessionId, {
     toolName: request.toolName,
     ...(request.callId === undefined
       ? {}
@@ -68,6 +113,7 @@ async function answerApproval(
   } finally {
     remove()
     completed.resolve()
+    scope.release?.()
   }
 }
 /* jscpd:ignore-end */

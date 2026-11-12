@@ -417,20 +417,23 @@ describe('Typert Remote streams', () => {
     expect(() => { startup.commit() }).not.toThrow()
   })
 
-  it('validates the WebSocket heartbeat timer range, the stream inbox bound, and the compression mode', () => {
+  it('validates the WebSocket heartbeat timer range, the stream inbox bound, the compression mode, and the event fallback grace', () => {
     expect(TypertGatewayService.Config({})).toEqual({
       websocketHeartbeatIntervalMs: 2_000,
       streamInboxBytes: 262_144,
       websocketCompression: 'deflate',
+      remoteEventFallbackGraceMs: 60_000,
     })
     expect(TypertGatewayService.Config({
       websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
       streamInboxBytes: 1,
       websocketCompression: 'none',
+      remoteEventFallbackGraceMs: 0,
     })).toEqual({
       websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
       streamInboxBytes: 1,
       websocketCompression: 'none',
+      remoteEventFallbackGraceMs: 0,
     })
     for (const websocketHeartbeatIntervalMs of [0, 1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ websocketHeartbeatIntervalMs })).toThrow()
@@ -440,6 +443,9 @@ describe('Typert Remote streams', () => {
     }
     for (const websocketCompression of ['gzip', 'DEFLATE', '', 1]) {
       expect(() => TypertGatewayService.Config({ websocketCompression } as never)).toThrow()
+    }
+    for (const remoteEventFallbackGraceMs of [-1, 1.5, MAX_TIMER_DELAY_MS + 1]) {
+      expect(() => TypertGatewayService.Config({ remoteEventFallbackGraceMs })).toThrow()
     }
   })
 
@@ -1468,8 +1474,8 @@ describe('Typert Remote streams', () => {
     await unregister()
   })
 
-  it('delegates a scoped waterfall that reached no answering Client stream', async () => {
-    const { ctx } = await setup(false)
+  it('delegates a scoped waterfall that reached no answering Client stream when the fallback grace is disabled', async () => {
+    const { ctx } = await setup(false, { remoteEventFallbackGraceMs: 0 })
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const pending = pendingInvocation(ctx.extend(), undefined, 'no-client', agentId('agent-no-client'))
@@ -1481,8 +1487,8 @@ describe('Typert Remote streams', () => {
     await unregister()
   })
 
-  it('delegates a scoped waterfall when its last answering Client disconnects unanswered', async () => {
-    const { ctx } = await setup(true)
+  it('delegates a disconnected waterfall when the fallback grace is disabled', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: 0 })
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const client = await openEventClient(ctx, 'events-disconnect')
@@ -1497,6 +1503,85 @@ describe('Typert Remote streams', () => {
     await expect(pending.outcome).resolves.toEqual({ kind: 'next' })
     expect(pending.resolve).toHaveBeenCalledTimes(1)
     expect(pending.reject).not.toHaveBeenCalled()
+    await unregister()
+  })
+
+  it('holds a waterfall with no answering Client stream and redelivers it to a Client that connects inside the grace window', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: 60_000 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const pending = pendingInvocation(ctx.extend(), undefined, 'late-connect', agentId('agent-grace'))
+
+    source.push(pending.dispatch)
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(pending.resolve).not.toHaveBeenCalled()
+
+    const client = await openEventClient(ctx, 'events-grace')
+    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
+    const frame = deliveredInvocation(client)!
+    await sendEventResult(client, frame, { kind: 'result', value: 'allowed' })
+
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    expect(pending.reject).not.toHaveBeenCalled()
+    client.socket.close()
+    await unregister()
+  })
+
+  it('holds a waterfall through a Client reconnect inside the grace window', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: 60_000 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const client = await openEventClient(ctx, 'events-before-reconnect')
+    const pending = pendingInvocation(ctx.extend(), undefined, 'reconnect', agentId('agent-reconnect'))
+
+    source.push(pending.dispatch)
+    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
+    const closed = once(client.socket, 'close')
+    client.socket.close()
+    await closed
+    expect(pending.resolve).not.toHaveBeenCalled()
+
+    const replacement = await openEventClient(ctx, 'events-after-reconnect')
+    await vi.waitFor(() => { expect(deliveredInvocation(replacement)).toBeDefined() })
+    await sendEventResult(replacement, deliveredInvocation(replacement)!, { kind: 'result', value: 'allowed' })
+
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    replacement.socket.close()
+    await unregister()
+  })
+
+  it('delegates to the Host chain when the fallback grace window expires unanswered', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: 20 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const pending = pendingInvocation(ctx.extend(), undefined, 'expired', agentId('agent-expired'))
+
+    source.push(pending.dispatch)
+
+    await expect(pending.outcome).resolves.toEqual({ kind: 'next' })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    expect(pending.reject).not.toHaveBeenCalled()
+    await unregister()
+  })
+
+  it('settles once when a Client answers before the grace window expires', async () => {
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: 20 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const client = await openEventClient(ctx, 'events-answered')
+    const pending = pendingInvocation(ctx.extend(), undefined, 'answered', agentId('agent-answered'))
+
+    source.push(pending.dispatch)
+    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
+    await sendEventResult(client, deliveredInvocation(client)!, { kind: 'result', value: 'allowed' })
+    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
+
+    await new Promise((resolve) => { setTimeout(resolve, 50) })
+    expect(pending.resolve).toHaveBeenCalledTimes(1)
+    expect(pending.reject).not.toHaveBeenCalled()
+    client.socket.close()
     await unregister()
   })
 
@@ -1533,7 +1618,7 @@ describe('Typert Remote streams', () => {
   })
 
   it('settles a waterfall with no answering Client instead of replaying it to a later Client', async () => {
-    const { ctx } = await setup(true)
+    const { ctx } = await setup(true, { remoteEventFallbackGraceMs: 0 })
     const source = new RemoteEventSourceProbe()
     const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
     const agent = ctx.extend()

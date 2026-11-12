@@ -18,6 +18,7 @@ import { apply as nodeApply } from '../src/index.ts'
 type ApprovalListener = (
   this: Context,
   request: {
+    agent?: Context
     toolName: string
     callId?: string
     reason?: string
@@ -213,14 +214,19 @@ describe('PendingApproval', () => {
 })
 
 describe('approval Remote Event consumer', () => {
-  it('delegates an event that has no Agent scope', async () => {
+  it('reports an event that reaches no Agent scope instead of dropping it silently', async () => {
     const bench = await setupPlugin()
     const next = vi.fn(() => Promise.resolve<'unavailable'>('unavailable'))
+    const diagnostics = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    await expect(bench.listener.call(bench.ctx, { toolName: 'bash' }, next))
+    await expect(bench.listener.call(bench.ctx, { agent: bench.ctx, toolName: 'bash' }, next))
       .resolves.toBe('unavailable')
     expect(next).toHaveBeenCalledOnce()
     expect(bench.pending.getSnapshot()).toEqual([])
+    expect(diagnostics).toHaveBeenCalledWith(
+      '[ui-approval] approval request reached no Agent scope; delegating to the Host chain:',
+      'bash',
+    )
     expect(bench.register).toHaveBeenCalledOnce()
     expect(bench.shortcuts.mock.calls.map(([entry]) => entry.label())).toEqual(['allow', 'reject'])
   })
@@ -232,6 +238,7 @@ describe('approval Remote Event consumer', () => {
     const controller = new AbortController()
     const next = vi.fn(() => Promise.resolve<'unavailable'>('unavailable'))
     const result = bench.listener.call(scope.ctx, {
+      agent: scope.ctx,
       toolName: 'bash',
       callId: 'call-1',
       reason: 'needs access',
@@ -271,6 +278,7 @@ describe('approval Remote Event consumer', () => {
     const controller = new AbortController()
     const reason = new Error('cancelled by host')
     const result = bench.listener.call(scope.ctx, {
+      agent: scope.ctx,
       toolName: 'bash',
       signal: controller.signal,
     }, () => Promise.resolve('unavailable'))

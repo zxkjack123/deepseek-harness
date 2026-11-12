@@ -224,7 +224,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-gateway`
 
 - `inject`: `typert` · `remoteAccess`
-- `source`: [`packages/api/gateway/src/index.ts:158`](../packages/api/gateway/src/index.ts)
+- `source`: [`packages/api/gateway/src/index.ts:161`](../packages/api/gateway/src/index.ts)
 
 ```ts config-catalog
 /** Gateway transport configuration. */
@@ -235,6 +235,12 @@ export interface Config {
   readonly streamInboxBytes?: number
   /** Per-message compression for the Remote stream WebSocket; `'none'` disables the extension. @default 'deflate' */
   readonly websocketCompression?: 'none' | 'deflate'
+  /**
+   * Milliseconds a forwarded waterfall with no answering Client stream stays pending before the
+   * Host chain answers it. Covers a Client that is only briefly away (locked screen, reconnecting
+   * page); `0` delegates immediately. @default 60000
+   */
+  readonly remoteEventFallbackGraceMs?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->

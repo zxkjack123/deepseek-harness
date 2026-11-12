@@ -139,6 +139,8 @@ interface PendingRemoteEvent {
   readonly source: TypertRemoteEventInvocation
   readonly frame: RemoteEventInvocationFrame
   readonly deliveries: Set<RemoteEventClient>
+  /** Armed while no answering Client stream holds this event; see {@link TypertGatewayService} config. */
+  fallbackTimer: ReturnType<typeof setTimeout> | undefined
   releaseContext: () => void
   releaseSignal: () => void
 }
@@ -148,6 +150,7 @@ type ConnectionRpcError = Extract<ConnectionRpcResult, { readonly ok: false }>['
 const NEVER_ABORTED_SIGNAL = new AbortController().signal
 const DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2_000
 const DEFAULT_STREAM_INBOX_BYTES = 262_144
+const DEFAULT_REMOTE_EVENT_FALLBACK_GRACE_MS = 60_000
 const EMPTY_ASYNC_ITERABLE: AsyncIterable<never> = {
   [Symbol.asyncIterator]: () => ({ next: () => Promise.resolve({ value: undefined, done: true }) }),
 }
@@ -162,12 +165,19 @@ export interface Config {
   readonly streamInboxBytes?: number
   /** Per-message compression for the Remote stream WebSocket; `'none'` disables the extension. @default 'deflate' */
   readonly websocketCompression?: 'none' | 'deflate'
+  /**
+   * Milliseconds a forwarded waterfall with no answering Client stream stays pending before the
+   * Host chain answers it. Covers a Client that is only briefly away (locked screen, reconnecting
+   * page); `0` delegates immediately. @default 60000
+   */
+  readonly remoteEventFallbackGraceMs?: number
 }
 
 interface ResolvedConfig extends Config {
   readonly websocketHeartbeatIntervalMs: number
   readonly streamInboxBytes: number
   readonly websocketCompression: 'none' | 'deflate'
+  readonly remoteEventFallbackGraceMs: number
 }
 
 /**
@@ -218,6 +228,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
       .default(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS),
     streamInboxBytes: z.number().step(1).min(1).default(DEFAULT_STREAM_INBOX_BYTES),
     websocketCompression: z.union([z.const('none'), z.const('deflate')]).default('deflate'),
+    remoteEventFallbackGraceMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS)
+      .default(DEFAULT_REMOTE_EVENT_FALLBACK_GRACE_MS),
   })
 
   /** Carrier adapter shared by the WebSocket mux and local Host transports. */
@@ -229,6 +241,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
 
   private srcClaims: ReadonlySet<string> | undefined
   private remoteEvents: RegisteredRemoteEventSource | undefined
+  private readonly remoteEventFallbackGraceMs: number
   private readonly remoteEventClients = new Map<RemoteEventClientId, RemoteEventClient>()
   private readonly pendingRemoteEvents = new Map<RemoteEventId, PendingRemoteEvent>()
 
@@ -242,6 +255,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'typertGateway')
     const resolved = config as ResolvedConfig
+    this.remoteEventFallbackGraceMs = resolved.remoteEventFallbackGraceMs
     ctx.on('internal/service', () => {
       this.srcClaims = undefined
     })
@@ -681,6 +695,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
           request: projected.request,
         },
         deliveries: new Set(),
+        fallbackTimer: undefined,
         releaseContext,
         releaseSignal: () => {
           for (const signal of signals) signal.removeEventListener('abort', abort)
@@ -697,8 +712,9 @@ export class TypertGatewayService extends Service implements TypertGateway {
         for (const client of this.remoteEventClients.values()) {
           if (client.answers) this.deliverRemoteEvent(pending, client)
         }
-        // No answering Client stream can settle this event: delegate to the Host chain.
-        if (pending.deliveries.size === 0) this.settleRemoteEvent(pending, { kind: 'next' })
+        // No answering Client stream holds this event. That absence may be transient (a locked or
+        // reconnecting page), so the Host chain only takes over once the grace window expires.
+        if (pending.deliveries.size === 0) this.armRemoteEventFallback(pending)
       }
     } catch (error) {
       source.reject(error)
@@ -706,6 +722,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
   }
 
   private deliverRemoteEvent(pending: PendingRemoteEvent, client: RemoteEventClient): void {
+    // A Client now holds the event: withholding the Host delegation no longer applies.
+    this.cancelRemoteEventFallback(pending)
     pending.deliveries.add(client)
     client.deliveries.set(pending.id, pending)
     client.queue.push(pending.frame)
@@ -728,6 +746,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
     } else if (result.outcome.kind === 'rejected') {
       this.cancelRemoteEvent(pending, restoreRemoteEventRejection(result.outcome.error))
     } else if (pending.deliveries.size === 0) {
+      // Every holder declined explicitly, which is not a transient absence: keep delegating now.
       this.settleRemoteEvent(pending, { kind: 'next' })
     }
   }
@@ -741,10 +760,37 @@ export class TypertGatewayService extends Service implements TypertGateway {
     this.remoteEventClients.delete(client.id)
     for (const pending of [...client.deliveries.values()]) {
       this.removeRemoteEventDelivery(pending, client)
-      // The last Client that could answer is gone: delegate to the Host chain instead of hanging.
-      if (pending.deliveries.size === 0) this.settleRemoteEvent(pending, { kind: 'next' })
+      // The last Client that could answer is gone. Hold the event for the grace window so a
+      // returning Client still receives it, then delegate to the Host chain instead of hanging.
+      if (pending.deliveries.size === 0) this.armRemoteEventFallback(pending)
     }
     client.queue.end()
+  }
+
+  /**
+   * Withhold the Host delegation while no answering Client stream holds a forwarded waterfall.
+   * @param pending - forwarded waterfall that reached zero deliveries.
+   */
+  private armRemoteEventFallback(pending: PendingRemoteEvent): void {
+    this.cancelRemoteEventFallback(pending)
+    if (this.remoteEventFallbackGraceMs === 0) {
+      this.settleRemoteEvent(pending, { kind: 'next' })
+      return
+    }
+    pending.fallbackTimer = setTimeout(() => {
+      pending.fallbackTimer = undefined
+      this.settleRemoteEvent(pending, { kind: 'next' })
+    }, this.remoteEventFallbackGraceMs)
+  }
+
+  /**
+   * Disarm a pending Host delegation so the event is settled exactly once.
+   * @param pending - forwarded waterfall whose grace window ends.
+   */
+  private cancelRemoteEventFallback(pending: PendingRemoteEvent): void {
+    if (pending.fallbackTimer === undefined) return
+    clearTimeout(pending.fallbackTimer)
+    pending.fallbackTimer = undefined
   }
 
   private dismissRemoteEvent(pending: PendingRemoteEvent): void {
@@ -765,6 +811,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
 
   private finishRemoteEvent(pending: PendingRemoteEvent): void {
     this.pendingRemoteEvents.delete(pending.id)
+    this.cancelRemoteEventFallback(pending)
     pending.releaseSignal()
     pending.releaseContext()
     const clients = new Set(pending.deliveries)
