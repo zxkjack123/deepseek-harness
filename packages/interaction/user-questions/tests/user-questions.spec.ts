@@ -8,7 +8,8 @@ import UserQuestionService, {
   type AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
 import { createToolResultMessage, createUserMessage, ToolCallId, type ToolSchema, type UserMessage } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId, SESSION_FORMAT_VERSION, TOOL_OUTCOME_UNKNOWN } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SESSION_FORMAT_VERSION, SessionLogOffset, TOOL_OUTCOME_UNKNOWN } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 
 interface QuestionAnswerer {
@@ -952,5 +953,86 @@ describe('fixed approval presentation', () => {
       ...(kind === 'timed' ? { wait: { callId: ToolCallId('call') } } : {}),
     })).rejects.toMatchObject({ code: 'BAD_INTENT', message })
     expect(p.seen).toEqual([])
+  })
+})
+
+/**
+ * The join between two halves covered elsewhere: `session-cold.host.spec.ts` owns
+ * "a Remote call resumes a cold Session", and the `late replies` block owns "a continued
+ * question accepts an answer". Both of those build their Session with `Session.create` and
+ * append in-process. This block builds it with `Session.fromRestore` instead, so the
+ * projection has to fold a log it never produced — the shape a real resume hands to it.
+ */
+describe('restored session', () => {
+  /** The timed tool's schema as a restored request header records it: the wait parameter marks the call timed. */
+  const restoredSchema: ToolSchema = {
+    name: 'ask_user_question',
+    description: 'Ask brief questions.',
+    parameters: { type: 'object', properties: { questions: { type: 'array' }, [TIMED_WAIT_PARAMETER]: { type: 'integer' } } },
+  }
+
+  it('answers a question whose only record is the restored log', async () => {
+    const id = SessionId('restored-question')
+    const seed = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      { type: 'step/start', seq: 1, time: 2, data: { turn: 1, step: 1 } },
+      {
+        type: 'request/header',
+        seq: 2,
+        time: 3,
+        data: {
+          header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, tools: [restoredSchema] },
+          reason: 'initial',
+        },
+      },
+      {
+        type: 'tool/call',
+        seq: 3,
+        time: 4,
+        data: {
+          turn: 1, step: 1, callId: timedCallId, name: 'ask_user_question',
+          arguments: JSON.stringify({ questions: timedQuestions }),
+        },
+      },
+      {
+        type: 'tool/result',
+        seq: 4,
+        time: 5,
+        surfaceOp: 'append',
+        data: {
+          turn: 1,
+          step: 1,
+          message: createToolResultMessage({
+            callId: timedCallId,
+            content: [{ type: 'text', text: JSON.stringify({ pending: true, callId: timedCallId }) }],
+            isError: false,
+          }),
+        },
+      },
+    ] as unknown as SessionEvent[]
+    const restoredHeader: SessionHeader = {
+      version: SESSION_FORMAT_VERSION, id, createdAt: 0, isSeeded: false,
+    }
+    // `inheritedEventCount` 0 is what a resumed (not forked) Session decodes: the whole log folds.
+    const restored = Session.fromRestore(id, seed, restoredHeader, SessionLogOffset(0), 'detached')
+
+    const ctx = await timedContext()
+    const agent = Object.assign(liveAgent('restored-question'), { session: restored })
+    ctx.agents.enter(agent)
+    const batch = { answers: [{ id: 'scope', selected: ['Tool only'] }] }
+
+    // Returns true only because the projection rebuilt the continued question from the restored log;
+    // a session that lost that question answers false.
+    expect(ctx.userQuestions.answer(agent, timedCallId, batch)).toBe(true)
+
+    expect(agent.steer).toHaveBeenCalledOnce()
+    expect(replyText(agent.steer.mock.calls[0]![0])).toEqual({
+      kind: 'answer_to_pending_question',
+      tool: 'ask_user_question',
+      callId: timedCallId,
+      questions: timedQuestions,
+      answers: batch.answers,
+    })
+    await ctx.fiber.dispose()
   })
 })
