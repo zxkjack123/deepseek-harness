@@ -1,6 +1,7 @@
 /** Approval composer and optional correlated-detail contracts. */
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { ApprovalDecision as HostApprovalDecision, ApprovalRequestId } from '@deepseek-ai/dsh-user-approval/types'
 import type {
   PropsLocale, PropsRenderFactories, PropsRuntime,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -60,6 +61,8 @@ export interface ApprovalDetailOwnerProps {
 
 /** Client-visible fields of an approval request projected through Remote Events. */
 export interface ApprovalPresentationRequest {
+  /** Audit identity of the ask, when the Host supplied one. */
+  readonly requestId?: ApprovalRequestId
   /** Tool requesting the decision. */
   readonly toolName: string
   /** Tool call correlated with the request. */
@@ -72,8 +75,15 @@ export interface ApprovalPresentationRequest {
   readonly signal?: AbortSignal
 }
 
-/** Decisions this interactive Client presentation can return. */
-export type ApprovalDecision = 'allowed-once' | 'rejected'
+/** Decisions this interactive Client presentation can return; the Host owns the vocabulary. */
+export type ApprovalDecision = HostApprovalDecision
+
+/**
+ * Deliver one decision for a request this Client knows only from the
+ * `approvalState` projection. The promise rejects when the Host refuses the
+ * answer, which leaves the card answerable.
+ */
+export type ApprovalDeliver = (decision: ApprovalDecision) => Promise<void>
 
 let nextApprovalKey = 0
 
@@ -86,6 +96,8 @@ export class PendingApproval {
   readonly kind: 'approval'
   /** Opaque render identity and one-shot remount axis. */
   readonly key: string
+  /** Audit identity of the ask, when the Host supplied one. */
+  readonly requestId: ApprovalRequestId | undefined
   /** Tool requesting the decision. */
   readonly toolName: string
   /** Correlated Tool call, when supplied by the asker. */
@@ -101,17 +113,27 @@ export class PendingApproval {
   readonly #reject: (reason: unknown) => void
   readonly #signal: AbortSignal | undefined
   readonly #onAbort: (() => void) | undefined
+  #deliver: ApprovalDeliver | undefined
+  #liveAbort: { readonly signal: AbortSignal; readonly onAbort: () => void } | undefined
   readonly #delegated = Symbol('pending approval delegated')
   #settled = false
 
   /**
    * @param sessionId - Agent/Session identity owning the scoped request.
    * @param request - Host approval request projected through the Remote Event.
+   * @param deliver - late-answer delivery for a request rebuilt from the
+   *   projection; absent when a live waterfall carries the request.
    */
-  constructor(readonly sessionId: SessionId, request: ApprovalPresentationRequest) {
+  constructor(readonly sessionId: SessionId, request: ApprovalPresentationRequest, deliver?: ApprovalDeliver) {
     this.kind = 'approval'
-    nextApprovalKey += 1
-    this.key = `approval:${String(nextApprovalKey)}`
+    this.requestId = request.requestId
+    if (request.requestId === undefined) {
+      nextApprovalKey += 1
+      this.key = `approval:${String(nextApprovalKey)}`
+    } else {
+      this.key = `approval:${sessionId}:${request.requestId}`
+    }
+    this.#deliver = deliver
     this.toolName = request.toolName
     this.callId = request.callId
     this.reason = request.reason
@@ -145,10 +167,32 @@ export class PendingApproval {
    * Resolve the Host waterfall with the user's decision.
    * @param outcome - supported interactive decision.
    */
-  answer(outcome: ApprovalDecision): Promise<void> {
-    return settlePendingComposer(() => {
+  async answer(outcome: ApprovalDecision): Promise<void> {
+    // A rebuilt card has no live waterfall: the decision travels to the Host
+    // on its own. A refusal leaves the card answerable for another try.
+    if (this.#deliver !== undefined) await this.#deliver(outcome)
+    await settlePendingComposer(() => {
       this.finish(() => { this.#resolve(outcome) })
     }, 'pending approval settlement failed')
+  }
+
+  /**
+   * Let a live waterfall carry an ask this Client already presented from the
+   * projection, so one ask keeps one card and no second delivery races it.
+   * @param signal - the live request's cancellation lifetime; aborting it ends
+   *   the card, which is how a request settled in another browser disappears.
+   */
+  attachLive(signal?: AbortSignal): void {
+    this.#deliver = undefined
+    if (signal === undefined) return
+    // Replacement, not addition: one live request owns this card at a time.
+    this.#liveAbort?.signal.removeEventListener('abort', this.#liveAbort.onAbort)
+    const onAbort = (): void => {
+      this.abort(signal.reason ?? new Error('approval request was aborted'))
+    }
+    this.#liveAbort = { signal, onAbort }
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
   }
 
   /** Delegate an unanswered request to the next waterfall listener. */
@@ -180,6 +224,9 @@ export class PendingApproval {
     this.#settled = true
     if (this.#signal !== undefined && this.#onAbort !== undefined) {
       this.#signal.removeEventListener('abort', this.#onAbort)
+    }
+    if (this.#liveAbort !== undefined) {
+      this.#liveAbort.signal.removeEventListener('abort', this.#liveAbort.onAbort)
     }
     settle()
   }

@@ -85,6 +85,8 @@ interface ApprovalRequest extends ApprovalRequestEvent {
 
 `ctx.approval.request(req)` 要求发起请求的会话处于一个尚未结束的轮次内。它追加 `approval/asked`，获取一个结果，追加对应的 `approval/decided`，然后以该结果完成。`never` 策略在服务内部、waterfall 分发之前强制执行，因此即使后来以 `prepend` 注册的应答者也无法绕过它。应答者在负责处理该请求时返回结果，否则调用 `next()` 委托；第一个应答占据唯一的决策槽位。
 
+决定不属于展示它的那个界面。`approvalState` Projection 会发布每个仍缺少 `approval/decided` 的请求，`answerLate(agent, id, decision)`——一个 Remote 方法——可以在刷新或重连丢失 live 派发后为其中之一递交决定。waterfall 与迟到入口结算同一条进行中的记录，因此第一个答案获胜；后到的答案会收到结构化的 `approval/already-answered`、`approval/not-pending` 或 `approval/wrong-session` 失败，而不是第二条审计事件。
+
 审计事件仅写入日志，不进入模型 transcript（文本记录）。模型可见的行为是调用方派生的工具结果与当前运行时上下文快照。服务 dispose（资源释放）时会移除其上下文贡献；应答者监听器独立地通过 effect 绑定到其所属插件。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
@@ -139,6 +141,22 @@ async request(req: ApprovalRequest): Promise<ApprovalOutcome>
  * @returns the last logged policy, or `undefined` without one.
  */
 overrideOf(session: Session): ApprovalPolicy | undefined
+
+/**
+ * Deliver a decision for a request this Client knows from the projection
+ * instead of from a live `approval/request` dispatch. The first answer wins:
+ * whichever surface settles the request first appends its single
+ * `approval/decided`; a later answer is refused with a structured failure
+ * instead of a second audit event.
+ * @param agent - live agent owning the Session the card was restored for.
+ * @param id - the `approval/asked` identity shown by the projection.
+ * @param decision - the interactive decision the user made.
+ * @throws {RemoteError} `approval/bad-outcome` for an outcome a Client may not
+ *   send, `approval/not-pending` when no request by that id awaits a decision,
+ *   `approval/wrong-session` when the id belongs to another Session, and
+ *   `approval/already-answered` when another surface already settled it.
+ */
+@Remote answerLate(agent: Agent, id: ApprovalRequestId, decision: ApprovalDecision): void
 ```
 
 Types: [Agent](core.zh.md) · [Session](session.zh.md)

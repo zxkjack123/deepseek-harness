@@ -85,6 +85,8 @@ interface ApprovalRequest extends ApprovalRequestEvent {
 
 `ctx.approval.request(req)` requires the requesting session to be inside an open turn. It appends `approval/asked`, obtains one outcome, appends the matching `approval/decided`, and resolves with that outcome. The `never` policy is enforced inside the service before waterfall dispatch, so even an answerer registered later with `prepend` cannot bypass it. Answerers return an outcome when they own the request or call `next()` to delegate; the first answer occupies the single decision slot.
 
+The decision does not belong to the surface that displayed it. The `approvalState` projection publishes every request whose `approval/decided` is still missing, and `answerLate(agent, id, decision)` — a Remote method — delivers a decision for one of them after a reload or reconnect dropped the live dispatch. The waterfall and the late entry settle the same in-flight record, so the first answer wins; a later answer is refused with a structured `approval/already-answered`, `approval/not-pending`, or `approval/wrong-session` failure instead of a second audit event.
+
 The audit events are log-only and do not enter the model transcript. Model-visible behavior is the caller's derived tool result plus the current runtime-context snapshot. Service disposal removes its context contribution; answerer listeners are independently effect-bound to their owning plugins.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
@@ -139,6 +141,22 @@ async request(req: ApprovalRequest): Promise<ApprovalOutcome>
  * @returns the last logged policy, or `undefined` without one.
  */
 overrideOf(session: Session): ApprovalPolicy | undefined
+
+/**
+ * Deliver a decision for a request this Client knows from the projection
+ * instead of from a live `approval/request` dispatch. The first answer wins:
+ * whichever surface settles the request first appends its single
+ * `approval/decided`; a later answer is refused with a structured failure
+ * instead of a second audit event.
+ * @param agent - live agent owning the Session the card was restored for.
+ * @param id - the `approval/asked` identity shown by the projection.
+ * @param decision - the interactive decision the user made.
+ * @throws {RemoteError} `approval/bad-outcome` for an outcome a Client may not
+ *   send, `approval/not-pending` when no request by that id awaits a decision,
+ *   `approval/wrong-session` when the id belongs to another Session, and
+ *   `approval/already-answered` when another surface already settled it.
+ */
+@Remote answerLate(agent: Agent, id: ApprovalRequestId, decision: ApprovalDecision): void
 ```
 
 Types: [Agent](core.md) · [Session](session.md)

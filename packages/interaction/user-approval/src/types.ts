@@ -9,6 +9,9 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type { Agent } from '@deepseek-ai/dsh-agent/types'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import type {} from '@deepseek-ai/dsh-session-projection/types'
+import type { SessionProjectionSummaryExcluded } from '@deepseek-ai/dsh-session-projection/types'
+import type {} from '@deepseek-ai/dsh-typert-protocol'
 
 /**
  * Pairs one `approval/asked` audit event with its `approval/decided`.
@@ -30,6 +33,53 @@ export function ApprovalRequestId(id: string): ApprovalRequestId {
  * request, or unavailable answerer. Callers fail closed on `unavailable`.
  */
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
+/**
+ * Decisions an interactive Client may deliver for a pending request. The
+ * late-answer entry accepts this subset of {@link ApprovalOutcome}: a Client
+ * never withdraws a request and never decides it unavailable.
+ */
+export type ApprovalDecision = 'allowed-once' | 'rejected'
+
+/**
+ * One request awaiting a decision, as the shared `approvalState` projection
+ * publishes it. `displayReason` is absent because localized presentation copy
+ * is never persisted; a card rebuilt from the log falls back to `reason`.
+ */
+export interface PendingApprovalView {
+  /** The `approval/asked` identity, paired with the `approval/decided` that will settle it. */
+  readonly id: ApprovalRequestId
+  /** Tool whose operation awaits the decision. */
+  readonly toolName: string
+  /** Exact tool call being decided, when the asker had one. */
+  readonly callId?: ToolCallId
+  /** Human-readable explanation supplied by the asker. */
+  readonly reason?: string
+}
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /**
+     * Requests awaiting a decision in this Session, in ask order. Excluded
+     * from Session summaries: `reason` is unbounded asker text that no list
+     * row renders, and an opened Session receives every value anyway.
+     */
+    approvalState: SessionProjectionSummaryExcluded<PendingApprovalView[]>
+  }
+}
+
+declare module '@deepseek-ai/dsh-typert-protocol' {
+  interface RemoteErrorDetailsMap {
+    /** The named request is not awaiting a decision in this Host. */
+    'approval/not-pending': { readonly id: ApprovalRequestId }
+    /** Another surface already settled the named request; the first answer won. */
+    'approval/already-answered': { readonly id: ApprovalRequestId }
+    /** The named request belongs to a different Session than the caller's. */
+    'approval/wrong-session': { readonly id: ApprovalRequestId }
+    /** The wire carried an outcome outside {@link ApprovalDecision}. */
+    'approval/bad-outcome': { readonly outcome: string }
+  }
+}
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -63,6 +113,12 @@ declare module '@deepseek-ai/dsh-session/types' {
 export interface ApprovalRequestEvent {
   /** Agent identity projected to the corresponding Client Context in transit. */
   readonly agent: Agent
+  /**
+   * Audit identity of this ask, so a Client that also rebuilt the request from
+   * the `approvalState` projection presents ONE card and answers through the
+   * same identity when no live waterfall carries it.
+   */
+  readonly requestId?: ApprovalRequestId
   /** Tool whose operation requires a decision. */
   readonly toolName: string
   /** Exact tool call being decided, when available. */

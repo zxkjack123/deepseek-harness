@@ -52,6 +52,8 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 `request(req)` names the agent, tool, optional call id and reason, and an abort signal. Optional `displayReason` supplies localized presentation text without changing the logged reason. It requires an open turn: an idle or between-turn caller throws before auditing anything. Aborting withdraws the question — the request settles `cancelled` and a late answer is discarded. Every dispatched answerer receives the request fields with a request-scoped signal composed with the caller's; the service aborts it with a structured `Error` once the request settles, so an answerer that observes withdrawal only through the signal releases its prompt when another surface decides. A failure that prevents either audit append from committing rejects instead of returning an unlogged decision.
 
+The answering surface is not necessarily the surface that dispatched the request: a page reload or reconnect drops the live `approval/request` dispatch while the decision is still pending. The `approvalState` projection therefore publishes every unanswered ask, and `answerLate(agent, id, decision)` delivers a decision for one of them without a live waterfall. It is a Remote method, so a browser Client calls `remote.approval.answerLate`. The first answer wins: whichever surface settles the request first appends its single `approval/decided`. A later answer is refused with a structured failure — `approval/already-answered` while the request is still finishing, `approval/not-pending` once it ended or never existed, `approval/wrong-session` for an id owned by another Session, and `approval/bad-outcome` for a decision outside `allowed-once`/`rejected`.
+
 ### What the model and user see
 
 The model sees only the asking consumer's eventual tool outcome — allowed, rejected, cancelled, or unavailable — plus the current policy in the runtime-context snapshot; the audit events and the human permission UI are not model context. Each policy switch is announced to the model by a sourced user message, and both policies contribute their complete current meaning to the snapshot.
@@ -71,15 +73,15 @@ The observable behavior is covered in [Use this package](#use-this-package); thi
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | `ApprovalService`: request dispatch, private approval state, policy write path, runtime-context contribution |
-| [`src/types.ts`](src/types.ts) | `ApprovalRequestId` brand and outcome types |
+| [`src/types.ts`](src/types.ts) | `ApprovalRequestId` brand, outcome and decision vocabularies, the published pending-request view, and this service's Remote failure codes |
 
 ### Dispatch
 
-`decide()` races the answerer waterfall against the request signal and contains every answerer failure: a throwing listener fails the question closed to `unavailable`, and a rogue non-vocabulary return is normalized to `unavailable`. The `never` policy is enforced inside the service before waterfall dispatch, so a listener registered later with `prepend` cannot bypass the deterministic rejection. The request must be turn-enclosed because the turn is the durable log's commit/replay boundary — a bare event between turns is indistinguishable from a crash tail.
+`decide()` races the answerer waterfall against the request signal and contains every answerer failure: a throwing listener fails the question closed to `unavailable`, and a rogue non-vocabulary return is normalized to `unavailable`. The `never` policy is enforced inside the service before waterfall dispatch, so a listener registered later with `prepend` cannot bypass the deterministic rejection. The request must be turn-enclosed because the turn is the durable log's commit/replay boundary — a bare event between turns is indistinguishable from a crash tail. Each in-flight request is registered by its audit identity until its decision commits; the waterfall and `answerLate` settle that one record, so the map never outgrows the concurrent asks.
 
 ### Policy and the runtime-context snapshot
 
-The private host-only `approvalState` projection stores the policy override and whether a turn is open. Its size does not grow with the number of events. The registry includes it in persisted checkpoints; the event log remains authoritative. Its pure updates never dispatch questions or grant permission.
+The `approvalState` projection stores the policy override, whether a turn is open, and the requests whose `approval/decided` has not been folded yet. Its published view is the pending-request list, so a Client rebuilds the prompt from the log instead of depending on the dispatch that first showed it. Its size does not grow with the number of events — at most one entry per pending request. The registry includes it in persisted checkpoints; the event log remains authoritative. Its pure updates never dispatch questions or grant permission.
 
 Service activation waits for projection registration and fails if registration fails. The service keeps the returned reader private. The host and registry own Session recovery; approval methods do not load history or call hydration from a synchronous read. See the [registration and recovery API](../../session/session-projection/README.md). Pending questions, answerers, and grants remain in the runtime.
 

@@ -211,6 +211,7 @@ export const VIEWER_ENDPOINT_CLASSES = {
   'mcpManager/watch': 'owner-only', // owner MCP server management
   'commands/execute': 'owner-only', // owner executes a slash command
   'permissionPresets/catalog': 'owner-only', // owner permission presets
+  'approval/answerLate': 'owner-only', // owner answers a pending approval
   'userQuestions/answer': 'owner-only', // owner answers a pending question
   'userQuestions/attachWait': 'owner-only', // owner answers a pending question
   'llm/discoverModels': 'owner-only', // owner discovers models

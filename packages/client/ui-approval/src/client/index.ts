@@ -1,4 +1,4 @@
-/** Browser approval consumer over the existing scoped Remote Event waterfall. */
+/** Browser approval consumer over the scoped Remote Event waterfall and the recoverable `approvalState` projection. */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client'
 import { ApprovalCard } from './ApprovalCard.tsx'
 import { ApprovalPanel } from './ApprovalPanel.tsx'
+import { ApprovalCards, publishRestoredApprovals } from './restore.ts'
 import { PendingApproval } from './contract/slots.ts'
 import { en, ja, es, fr, de, ru, pt, zh } from './locales.ts'
 
@@ -31,8 +32,8 @@ declare module '@deepseek-ai/dsh-api-session-controller/client' {
   }
 }
 
-/** Required services: Agent scopes, Remote Events, Session UI, Slot registry, and copy. */
-export const inject = ['sessions', 'remote', 'uiSession', 'slots', 'locale']
+/** Required services: Agent scopes, Remote Events and the approval answer entry, Session UI, Slot registry, and copy. */
+export const inject = ['sessions', 'remote', 'remote.approval', 'uiSession', 'slots', 'locale']
 
 const NS = 'approval'
 
@@ -76,6 +77,7 @@ function resolveApprovalScope(
 /** Present one request until the user answers or its lifetime ends. */
 async function answerApproval(
   ctx: ClientContext,
+  cards: ApprovalCards,
   owner: ClientContext,
   request: ClientApprovalRequest,
   next: ClientApprovalNext,
@@ -89,7 +91,28 @@ async function answerApproval(
     )
     return next()
   }
-  const pending = new PendingApproval(scope.sessionId, {
+  const { sessionId } = scope
+  const requestId = request.requestId
+  const restored = requestId === undefined ? undefined : cards.get(sessionId, requestId)
+  if (requestId !== undefined && restored !== undefined) {
+    // The projection already presented this ask: this waterfall rides that card
+    // instead of publishing a second one.
+    restored.attachLive(request.signal)
+    cards.adopt(sessionId, requestId, () => {
+      restored.delegate()
+      return Promise.resolve()
+    })
+    try {
+      return await restored.result
+    } catch (error) {
+      if (restored.isDelegation(error)) return await next()
+      throw error
+    } finally {
+      scope.release?.()
+    }
+  }
+  const pending = new PendingApproval(sessionId, {
+    ...requestId === undefined ? {} : { requestId },
     toolName: request.toolName,
     ...(request.callId === undefined
       ? {}
@@ -99,19 +122,37 @@ async function answerApproval(
     ...(request.signal === undefined ? {} : { signal: request.signal }),
   })
   const completed = Promise.withResolvers<void>()
-  const remove = registerPendingInteraction(pending, async () => {
-    pending.delegate()
-    await completed.promise
-  })
-  try {
+  const settle = async (): Promise<ClientApprovalOutcome> => {
     try {
       return await pending.result
     } catch (error) {
       if (pending.isDelegation(error)) return await next()
       throw error
     }
+  }
+  if (requestId === undefined) {
+    // A Host that names no ask leaves nothing to reconcile against.
+    const remove = registerPendingInteraction(pending, async () => {
+      pending.delegate()
+      await completed.promise
+    })
+    try {
+      return await settle()
+    } finally {
+      remove()
+      completed.resolve()
+      scope.release?.()
+    }
+  }
+  // The card is published once for every source: answering it forgets the
+  // publication, so the waterfall needs no teardown of its own.
+  cards.present(sessionId, requestId, pending, async () => {
+    pending.delegate()
+    await completed.promise
+  })
+  try {
+    return await settle()
   } finally {
-    remove()
     completed.resolve()
     scope.release?.()
   }
@@ -119,7 +160,8 @@ async function answerApproval(
 /* jscpd:ignore-end */
 
 /**
- * Install approval copy and the scoped waterfall consumer.
+ * Install approval copy, the scoped waterfall consumer, and the projection
+ * reconciliation that keeps a pending decision answerable across reloads.
  * @param ctx - Client root context.
  */
 export function apply(ctx: ClientContext): void {
@@ -136,6 +178,8 @@ export function apply(ctx: ClientContext): void {
   const registerPendingInteraction = ctx.uiSession.registerPendingInteraction<PendingApproval>(
     () => 0,
   )
+  const cards = new ApprovalCards(registerPendingInteraction)
+  ctx.effect(() => publishRestoredApprovals(ctx, cards), 'ui-approval: restored cards')
   ctx.slots.registerFactory({
     name: 'conversation.approval.card', scope: 'session', locale: NS,
     children: { 'conversation.approval.detail': { kind: 'single', scope: 'session' } },
@@ -151,6 +195,6 @@ export function apply(ctx: ClientContext): void {
     }),
   }, ApprovalPanel))
   ctx.remote.$on('approval/request', function (request, next) {
-    return answerApproval(ctx, this, request, next, registerPendingInteraction)
+    return answerApproval(ctx, cards, this, request, next, registerPendingInteraction)
   })
 }

@@ -1,10 +1,11 @@
 import { Context, FiberState } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import ApprovalService, { ApprovalRequestId, setApprovalPolicy, type PendingApprovalView } from '@deepseek-ai/dsh-user-approval'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
 
@@ -48,7 +49,7 @@ describe('approval state', () => {
       session.append('turn/start', { turn: turn + 1 })
       setApprovalPolicy(session, 'ask')
     }
-    expect(ctx.sessionProjections.checkpoint(session)['approvalState']?.val).toEqual({ policy: 'ask', turnOpen: true })
+    expect(ctx.sessionProjections.checkpoint(session)['approvalState']?.val).toEqual({ policy: 'ask', turnOpen: true, active: [] })
     expect(ctx.approval.overrideOf(session)).toBe('ask')
   })
 
@@ -85,11 +86,12 @@ describe('approval state', () => {
     const rows = ctx.sessionProjections.checkpoint(session)
     const cut = session.seq
     expect(rows['approvalState']).toEqual({
-      ver: 1,
+      ver: 2,
       seq: cut - 1,
-      val: { policy: 'never', turnOpen: true },
+      val: { policy: 'never', turnOpen: true, active: [] },
     })
-    expect(ctx.sessionProjections.snapshot(session).values).not.toHaveProperty('approvalState')
+    // The unit publishes its pending requests, so every Client reads them.
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([])
 
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -108,7 +110,7 @@ describe('approval state', () => {
     await expect(ctx.approval.request({ agent: agentFor(session), toolName: 'echo' })).resolves.toBe('allowed-once')
     expect(answerer).toHaveBeenCalledOnce()
     expect(session.snapshotEvents().slice(-2).map(event => event.type)).toEqual(['approval/asked', 'approval/decided'])
-    expect(ctx.sessionProjections.checkpoint(session)['approvalState']?.val).toEqual({ policy: 'ask', turnOpen: true })
+    expect(ctx.sessionProjections.checkpoint(session)['approvalState']?.val).toEqual({ policy: 'ask', turnOpen: true, active: [] })
   })
 
   it('uses the retained reader for current reads and releases the unit with the service', async () => {
@@ -133,7 +135,7 @@ describe('approval state', () => {
     expect(ctx.sessionProjections.checkpoint(ctx.sessions.create())).not.toHaveProperty('approvalState')
     await ctx.plugin(ApprovalService)
     expect(ctx.approval.overrideOf(session)).toBe('never')
-    expect(ctx.sessionProjections.checkpoint(session)['approvalState']?.val).toEqual({ policy: 'never', turnOpen: false })
+    expect(ctx.sessionProjections.checkpoint(session)['approvalState']?.val).toEqual({ policy: 'never', turnOpen: false, active: [] })
   })
 
   it('waits for registration before activating its synchronous readers and prompt', async () => {
@@ -163,8 +165,11 @@ describe('approval state', () => {
   it('fails activation when its projection registration fails', async () => {
     const { ctx } = await harness()
     await ctx.sessionProjections.register({
-      key: 'approvalState', stateVersion: 2, stateSchema: z.string(),
+      key: 'approvalState', stateVersion: 3, stateSchema: z.string(),
       init: () => '', apply: state => state,
+      // The conflicting registration never publishes, so its wire block only
+      // has to satisfy the key's declared client view.
+      wire: { viewSchema: z.custom<PendingApprovalView[]>(() => false), view: () => [] },
     })
     const errorLog = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
     onTestFinished(() => { errorLog.mockRestore() })
@@ -206,7 +211,7 @@ describe('approval state', () => {
     const next = ctx.sessions.create()
     setApprovalPolicy(next, 'ask')
     expect(ctx.approval.overrideOf(next)).toBe('ask')
-    expect(ctx.sessionProjections.checkpoint(next)['approvalState']?.val).toEqual({ policy: 'ask', turnOpen: false })
+    expect(ctx.sessionProjections.checkpoint(next)['approvalState']?.val).toEqual({ policy: 'ask', turnOpen: false, active: [] })
   })
 
   it('does not publish a handle delivered after its owning service is disposed', async () => {
@@ -230,5 +235,112 @@ describe('approval state', () => {
     const prompt = await ctx.systemPrompt.assemble({ agent: agentFor(session) })
     expect(prompt.contexts).not.toContainEqual(expect.objectContaining({ name: 'approval:policy' }))
     expect(errorLog).not.toHaveBeenCalled()
+  })
+})
+
+describe('pending approval requests', () => {
+  async function askedSession() {
+    const { ctx } = await harness()
+    await ctx.plugin(ApprovalService)
+    const session = ctx.sessions.create()
+    session.append('turn/start', { turn: 1 })
+    return { ctx, session }
+  }
+
+  it('publishes an asked request until the decision that settles it', async () => {
+    const { ctx, session } = await askedSession()
+    const id = ApprovalRequestId('ask-1')
+    session.append('approval/asked', { id, toolName: 'bash', callId: ToolCallId('call-1'), reason: 'needs write access' })
+
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([
+      { id, toolName: 'bash', callId: 'call-1', reason: 'needs write access' },
+    ])
+
+    session.append('approval/decided', { id, outcome: 'allowed-once' })
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([])
+  })
+
+  it('folds a replayed ask and decision to the same state as one copy', async () => {
+    const { ctx, session } = await askedSession()
+    const replayed = ctx.sessions.create()
+    replayed.append('turn/start', { turn: 1 })
+    const id = ApprovalRequestId('ask-1')
+    for (const subject of [session, replayed]) {
+      subject.append('approval/asked', { id, toolName: 'bash' })
+      subject.append('approval/decided', { id, outcome: 'rejected' })
+    }
+    session.append('approval/asked', { id, toolName: 'bash' })
+    session.append('approval/decided', { id, outcome: 'rejected' })
+
+    expect(ctx.sessionProjections.checkpoint(replayed)['approvalState']?.val)
+      .toEqual(ctx.sessionProjections.checkpoint(session)['approvalState']?.val)
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([])
+  })
+
+  it('folds a re-asked identity without publishing a second request', async () => {
+    const { ctx, session } = await askedSession()
+    const id = ApprovalRequestId('ask-1')
+    const published = vi.fn()
+    // Materialize the cell, then watch the change feed: an unchanged state
+    // reference publishes nothing.
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([])
+    ctx.sessionProjections.onChanged(published)
+
+    session.append('approval/asked', { id, toolName: 'bash' })
+    expect(published).toHaveBeenCalledOnce()
+    // A checkpoint suffix can overlap history and replay the same ask.
+    session.append('approval/asked', { id, toolName: 'bash', reason: 'replayed' })
+
+    expect(published).toHaveBeenCalledOnce()
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([{ id, toolName: 'bash' }])
+  })
+
+  it('folds a decision whose ask the log never carried without publishing one', async () => {
+    const { ctx, session } = await askedSession()
+    session.append('approval/asked', { id: ApprovalRequestId('ask-1'), toolName: 'bash' })
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([{ id: 'ask-1', toolName: 'bash' }])
+    const published = vi.fn()
+    ctx.sessionProjections.onChanged(published)
+
+    session.append('approval/decided', { id: ApprovalRequestId('never-asked'), outcome: 'rejected' })
+
+    expect(published).not.toHaveBeenCalled()
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState)
+      .toEqual([{ id: 'ask-1', toolName: 'bash' }])
+  })
+
+  it('stays out of Session summaries', async () => {
+    const { ctx, session } = await askedSession()
+    session.append('approval/asked', { id: ApprovalRequestId('ask-1'), toolName: 'bash', reason: 'x'.repeat(4_096) })
+
+    expect([...ctx.sessionProjections.summaryKeys()]).not.toContain('approvalState')
+  })
+
+  it('keeps an unanswered request across a turn boundary', async () => {
+    const { ctx, session } = await askedSession()
+    const id = ApprovalRequestId('ask-1')
+    session.append('approval/asked', { id, toolName: 'bash' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    session.append('turn/start', { turn: 2 })
+
+    expect(ctx.sessionProjections.checkpoint(session)['approvalState']).toMatchObject({
+      ver: 2,
+      val: { turnOpen: true, active: [{ id, toolName: 'bash' }] },
+    })
+
+    session.append('approval/decided', { id, outcome: 'cancelled' })
+    expect(ctx.sessionProjections.checkpoint(session)['approvalState']?.val).toHaveProperty('active', [])
+  })
+
+  it('settles only the decided request when several stay pending', async () => {
+    const { ctx, session } = await askedSession()
+    const first = ApprovalRequestId('ask-1')
+    const second = ApprovalRequestId('ask-2')
+    session.append('approval/asked', { id: first, toolName: 'bash' })
+    session.append('approval/asked', { id: second, toolName: 'write' })
+
+    session.append('approval/decided', { id: first, outcome: 'rejected' })
+
+    expect(ctx.sessionProjections.snapshot(session).values.approvalState).toEqual([{ id: second, toolName: 'write' }])
   })
 })

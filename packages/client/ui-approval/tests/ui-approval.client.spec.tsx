@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createScope, scopeOf } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { ApprovalRequestId, PendingApprovalView } from '@deepseek-ai/dsh-user-approval/types'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApprovalCard } from '../src/client/ApprovalCard.tsx'
@@ -19,6 +20,7 @@ type ApprovalListener = (
   this: Context,
   request: {
     agent?: Context
+    requestId?: ApprovalRequestId
     toolName: string
     callId?: string
     reason?: string
@@ -28,9 +30,28 @@ type ApprovalListener = (
   next: () => Promise<'unavailable'>,
 ) => Promise<unknown>
 
+/** Minimal observable snapshot source, the shape the Session projections expose. */
+function snapshotOf<T>(initial: T) {
+  let value = initial
+  const listeners = new Set<() => void>()
+  return {
+    getSnapshot: (): T => value,
+    subscribe: (listener: () => void): (() => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    set: (next: T): void => {
+      value = next
+      for (const listener of [...listeners]) listener()
+    },
+  }
+}
+
 interface PluginBench {
   readonly ctx: Context
   readonly listener: ApprovalListener
+  readonly approvals: ReturnType<typeof snapshotOf<readonly PendingApprovalView[] | undefined>>
+  readonly remoteApproval: { answerLate: ReturnType<typeof vi.fn> }
   readonly pending: { getSnapshot(): readonly PendingApproval[] }
   readonly registerPendingInteraction: ReturnType<typeof vi.fn>
   readonly disposeSlot: ReturnType<typeof vi.fn>
@@ -80,13 +101,32 @@ async function setupPlugin(): Promise<PluginBench> {
     const dispose = ctx.effect(() => mount())
     return () => { void dispose() }
   })
+  const remoteApproval = {
+    answerLate: vi.fn(async (_sessionId: SessionId, _id: ApprovalRequestId, _decision: string) => (
+      { ok: true as const, value: undefined }
+    )),
+  }
+  ctx.provide('remote.approval', remoteApproval as never)
   ctx.provide('remote', {
     $on: (_event: string, callback: ApprovalListener) => {
       listener = callback
       return () => {}
     },
+    approval: remoteApproval,
   } as never)
-  ctx.provide('sessions', { scopeOf } as never)
+  const approvals = snapshotOf<readonly PendingApprovalView[] | undefined>([])
+  const list = snapshotOf({
+    ids: [id('s1')],
+    byId: { [id('s1')]: { id: id('s1') } },
+    phase: 'ready' as const,
+    subagentsByParent: {},
+    jobsBySession: {},
+    currentAddress: undefined,
+  })
+  const binding = vi.fn((sessionId: SessionId) => sessionId === id('s1')
+    ? { sessionId, session: { projections: { faceOf: (name: string) => name === 'approvalState' ? approvals : undefined } } }
+    : undefined)
+  ctx.provide('sessions', { scopeOf, list, binding } as never)
   ctx.provide('uiSession', { registerPendingInteraction } as never)
   ctx.provide('slots', { inject: injectSlot, register, registerFactory: vi.fn() } as never)
   const shortcuts = vi.fn((entry: { label: () => string }) => { entry.label(); return () => {} })
@@ -103,6 +143,8 @@ async function setupPlugin(): Promise<PluginBench> {
   return {
     ctx,
     listener,
+    approvals,
+    remoteApproval,
     pending: { getSnapshot: () => [...pending.keys()] },
     registerPendingInteraction,
     disposeSlot,
@@ -521,7 +563,7 @@ describe('ApprovalPanel', () => {
 
 describe('package entries', () => {
   it('declares its service edges and keeps the Host half inert', () => {
-    expect(inject).toEqual(['sessions', 'remote', 'uiSession', 'slots', 'locale'])
+    expect(inject).toEqual(['sessions', 'remote', 'remote.approval', 'uiSession', 'slots', 'locale'])
     expect(() => { nodeApply() }).not.toThrow()
   })
 })

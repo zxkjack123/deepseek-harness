@@ -12,11 +12,17 @@ Browser approval presentation over the Agent-scoped Remote Event waterfall. The 
 
 ## Table of Contents
 
+- [Recovering a pending approval](#recovering-a-pending-approval)
 - [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
 - [Dev Note](#dev-note)
 
 -----
+
+<a id="recovering-a-pending-approval"></a>
+## Recovering a pending approval
+
+Besides the live dispatch, the plugin reconciles the Session's `approvalState` projection: a request the log still lists as undecided gets one answerable card again after a reload or reconnect, and answering it calls `remote.approval.answerLate` because no waterfall waits in this browser. The two sources share one card per ask — a live dispatch adopts the card the projection already presented instead of publishing a second one — and a recovery card disappears when the projection stops listing the ask, while either source ends it when the live request is cancelled. A live card is never reclaimed just because a projection frame has not listed it yet. A refusal that no retry can fix retires the card locally, so a Host that restarted without re-registering the ask cannot resurrect it on the next projection update.
 
 Focus the approval detail region to approve with Enter or reject with Escape. The mounted plugin reserves both keys against editable shortcuts. Enter on the focused Reject button retains its native reject action. Input controls and IME candidates keep their own keys. Keyboard and pointer actions share one pending-request lock; a withdrawn or replaced request cannot accept another answer, and an earlier failed answer cannot unlock its replacement.
 
@@ -37,6 +43,7 @@ None; approval request and response rendering does not alter a model request.
 
 <a id="known-limitations-and-deferred-work"></a>
 
+- A pending approval whose Host process restarted cannot be settled in that process: the log still carries the ask, but no in-flight decision exists to answer. The card is retired on the first refused answer and stays retired until the log stops listing the ask, so a reload no longer shows a prompt that cannot work. The localized notice for that retirement is written to the Client diagnostics log; this package owns no toast surface.
 - The shared `conversation.approval.card` Factory presents reject, allow and an optional always-allow action, with caller-owned scope, subject metadata and answer callbacks. Tool approvals retain their two outcomes. Application consent can reuse the card without adopting tool-approval policy. Subject metadata enables left-aligned content and wrapping actions; callers that omit it retain inherited alignment and a single action row. Icons and labels identify the subject visually; the caller owns identity verification and saved grants.
 
 

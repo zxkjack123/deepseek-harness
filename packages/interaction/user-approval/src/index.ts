@@ -9,7 +9,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -21,6 +21,7 @@ import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition, ProjectionHandle } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -47,13 +48,15 @@ declare module '@deepseek-ai/dsh-session/types' {
 }
 
 import { ApprovalRequestId } from './types.ts'
-import type { ApprovalOutcome, ApprovalRequestEvent } from './types.ts'
+import type { ApprovalDecision, ApprovalOutcome, ApprovalRequestEvent, PendingApprovalView } from './types.ts'
 
 export { ApprovalRequestId } from './types.ts'
-export type { ApprovalOutcome } from './types.ts'
+export type { ApprovalDecision, ApprovalOutcome, PendingApprovalView } from './types.ts'
 
 /** Every {@link ApprovalOutcome}, for runtime normalization of answerer returns. */
 const OUTCOMES: readonly ApprovalOutcome[] = ['allowed-once', 'rejected', 'cancelled', 'unavailable']
+/** Every {@link ApprovalDecision}, for runtime normalization of a late answer's wire value. */
+const DECISIONS: readonly ApprovalDecision[] = ['allowed-once', 'rejected']
 
 /**
  * A session's approval policy — what happens to an {@link ApprovalService}
@@ -84,20 +87,48 @@ interface ApprovalState {
   policy: ApprovalPolicy | null
   // Mirrors AgentRegistry's turn enclosure without requiring an agent registry.
   turnOpen: boolean
+  /**
+   * Requests whose `approval/decided` has not been folded yet, in ask order.
+   * A pending ask outlives a turn boundary: only its own decision clears it.
+   */
+  active: PendingApprovalView[]
 }
+
+/** Persisted/wire form of one active approval request. */
+const pendingApprovalSchema: zod.ZodType<PendingApprovalView> = zod.object({
+  id: zod.string().min(1).transform(value => ApprovalRequestId(value)),
+  toolName: zod.string(),
+  callId: zod.string().min(1).transform(ToolCallId).optional(),
+  reason: zod.string().optional(),
+}).strict().transform((request): PendingApprovalView => ({
+  id: request.id,
+  toolName: request.toolName,
+  ...request.callId === undefined ? {} : { callId: request.callId },
+  ...request.reason === undefined ? {} : { reason: request.reason },
+}))
 
 const approvalStateDefinition = {
   key: 'approvalState',
-  stateVersion: 1,
+  stateVersion: 2,
   stateSchema: zod.object({
     policy: zod.enum(['ask', 'never']).nullable(),
     turnOpen: zod.boolean(),
+    active: zod.array(pendingApprovalSchema),
   }),
-  init: (): ApprovalState => ({ policy: null, turnOpen: false }),
+  init: (): ApprovalState => ({ policy: null, turnOpen: false, active: [] }),
   apply(state: ApprovalState, event: SessionEvent): ApprovalState {
     switch (event.type) {
       case 'approval/policy':
         return state.policy === event.data.policy ? state : { ...state, policy: event.data.policy }
+      case 'approval/asked': {
+        const active = pendingViewOf(event.data.id, event.data)
+        if (state.active.some(request => request.id === active.id)) return state
+        return { ...state, active: [...state.active, active] }
+      }
+      case 'approval/decided': {
+        if (!state.active.some(request => request.id === event.data.id)) return state
+        return { ...state, active: state.active.filter(request => request.id !== event.data.id) }
+      }
       case 'turn/start':
         return state.turnOpen ? state : { ...state, turnOpen: true }
       case 'turn/end':
@@ -106,7 +137,47 @@ const approvalStateDefinition = {
         return state
     }
   },
+  wire: {
+    viewSchema: zod.array(pendingApprovalSchema),
+    view: (state: ApprovalState) => state.active,
+    // A list row renders no approval prompt and `reason` is unbounded asker text.
+    summary: false,
+  },
 } satisfies ProjectionDefinition<'approvalState', ApprovalState>
+
+/**
+ * Build the published form of one ask, omitting absent optional fields so a
+ * replay of the same event yields an equal value.
+ * @param id - the ask's audit identity.
+ * @param asked - the optional fields the asker supplied.
+ * @returns the request as every Client reads it.
+ */
+function pendingViewOf(
+  id: ApprovalRequestId,
+  asked: { readonly toolName: string; readonly callId?: ApprovalRequestEvent['callId']; readonly reason?: string },
+): PendingApprovalView {
+  return {
+    id,
+    toolName: asked.toolName,
+    ...asked.callId === undefined ? {} : { callId: asked.callId },
+    ...asked.reason === undefined ? {} : { reason: asked.reason },
+  }
+}
+
+/**
+ * One in-flight decision: the request identity, its owning Session, and the
+ * one settlement that both the live waterfall and a late answer race for.
+ */
+interface PendingDecision {
+  readonly id: ApprovalRequestId
+  readonly session: Session
+  /** Request-scoped lifetime handed to answerers; aborted when the decision settles. */
+  readonly lifetime: AbortController
+  readonly outcome: Promise<ApprovalOutcome>
+  readonly resolve: (outcome: ApprovalOutcome) => void
+  /** Set by the first settlement; later answers are refused. */
+  answered: boolean
+}
 
 /**
  * Append the sole durable representation of a session policy override. Invalid
@@ -164,7 +235,7 @@ export interface Config {
  * ask/outcome pair to the requesting session. It exposes deterministic policy
  * changes to the model through the runtime-context snapshot and switch notices.
  */
-export class ApprovalService extends Service {
+export class ApprovalService extends TypertRemoteService {
   static inject = ['sessionProjections']
 
   static Config: z<Config> = z.object({
@@ -172,6 +243,12 @@ export class ApprovalService extends Service {
   })
 
   private approvalProjectionHandle!: ProjectionHandle<ApprovalState>
+  /**
+   * In-flight decisions by audit identity. A Client that rebuilt the request
+   * from the projection answers through this map; the live waterfall races it
+   * and the first settlement wins. Entries never outnumber concurrent asks.
+   */
+  private readonly pendings = new Map<ApprovalRequestId, PendingDecision>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'approval')
@@ -257,9 +334,35 @@ export class ApprovalService extends Service {
       ...req.callId !== undefined ? { callId: req.callId } : {},
       ...req.reason !== undefined ? { reason: req.reason } : {},
     })
-    const outcome = await this.decide(req, session)
-    session.append('approval/decided', { id, outcome })
-    return outcome
+    const pending = this.openDecision(id, session)
+    try {
+      const outcome = await this.decide(req, pending)
+      session.append('approval/decided', { id, outcome })
+      return outcome
+    } finally {
+      // The id stops being answerable at the same commit that records its outcome.
+      this.pendings.delete(id)
+    }
+  }
+
+  /**
+   * Register one in-flight decision before any surface can answer it.
+   * @param id - the audit identity just appended.
+   * @param session - the Session whose log records the pair.
+   * @returns the pending record both answer paths settle.
+   */
+  private openDecision(id: ApprovalRequestId, session: Session): PendingDecision {
+    const completion = Promise.withResolvers<ApprovalOutcome>()
+    const pending: PendingDecision = {
+      id,
+      session,
+      lifetime: new AbortController(),
+      outcome: completion.promise,
+      resolve: completion.resolve,
+      answered: false,
+    }
+    this.pendings.set(id, pending)
+    return pending
   }
 
   /**
@@ -287,29 +390,84 @@ export class ApprovalService extends Service {
   }
 
   /**
-   * Dispatch the waterfall, contained and raced against the request signal.
+   * Deliver a decision for a request this Client knows from the projection
+   * instead of from a live `approval/request` dispatch. The first answer wins:
+   * whichever surface settles the request first appends its single
+   * `approval/decided`; a later answer is refused with a structured failure
+   * instead of a second audit event.
+   * @param agent - live agent owning the Session the card was restored for.
+   * @param id - the `approval/asked` identity shown by the projection.
+   * @param decision - the interactive decision the user made.
+   * @throws {RemoteError} `approval/bad-outcome` for an outcome a Client may not
+   *   send, `approval/not-pending` when no request by that id awaits a decision,
+   *   `approval/wrong-session` when the id belongs to another Session, and
+   *   `approval/already-answered` when another surface already settled it.
+   */
+  @Remote
+  answerLate(agent: Agent, id: ApprovalRequestId, decision: ApprovalDecision): void {
+    if (!DECISIONS.includes(decision)) {
+      throw new RemoteError(
+        'approval/bad-outcome',
+        `approval decision must be "allowed-once" or "rejected", got ${JSON.stringify(decision)}`,
+        { outcome: decision },
+      )
+    }
+    const pending = this.pendings.get(id)
+    if (pending === undefined) {
+      throw new RemoteError(
+        'approval/not-pending',
+        `approval request ${id} is not awaiting a decision`,
+        { id },
+      )
+    }
+    if (pending.session !== agent.session) {
+      throw new RemoteError(
+        'approval/wrong-session',
+        `approval request ${id} belongs to another Session`,
+        { id },
+      )
+    }
+    if (!this.settle(pending, decision)) {
+      throw new RemoteError(
+        'approval/already-answered',
+        `approval request ${id} was already answered`,
+        { id },
+      )
+    }
+  }
+
+  /**
+   * Dispatch the waterfall into one pending decision, contained and raced
+   * against the request signal and against `answerLate`.
    * Every answerer receives a request-scoped signal composed with the caller's;
    * the service aborts it once this request settles so a prompt that observes
    * only that signal releases when another answerer decides.
    * @param req - the borrowed public request.
-   * @param session - the request agent's session used for policy lookup.
+   * @param pending - the registered decision this dispatch settles.
    * @returns the normalized closed outcome.
    */
-  private async decide(req: ApprovalRequest, session: Session): Promise<ApprovalOutcome> {
+  private async decide(req: ApprovalRequest, pending: PendingDecision): Promise<ApprovalOutcome> {
+    const session = pending.session
     const signal = req.signal
-    if (signal?.aborted) return 'cancelled'
+    if (signal?.aborted) {
+      this.settle(pending, 'cancelled')
+      return pending.outcome
+    }
     // The 'never' policy is decided HERE, before any dispatch: a listener
     // registered with `prepend: true` after this service mounts would sit
     // ahead of any gate LISTENER, so a listener-shaped gate cannot keep the
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
-    if (this.effectivePolicy(session) === 'never') return 'rejected'
+    if (this.effectivePolicy(session) === 'never') {
+      this.settle(pending, 'rejected')
+      return pending.outcome
+    }
     // One lifetime per request: an answerer that learns withdrawal only through
     // the dispatched signal releases its prompt once any surface decides.
-    const lifetime = new AbortController()
     const dispatched = {
       ...req,
-      signal: signal === undefined ? lifetime.signal : AbortSignal.any([signal, lifetime.signal]),
+      requestId: pending.id,
+      signal: signal === undefined ? pending.lifetime.signal : AbortSignal.any([signal, pending.lifetime.signal]),
     }
     // Enter the promise chain BEFORE dispatching: a listener that throws
     // SYNCHRONOUSLY (before its first await) must land in the same rejection
@@ -328,27 +486,28 @@ export class ApprovalService extends Service {
       // tool call open — the seam contains its callbacks.
       () => 'unavailable',
     )
-    const withdraw = signal === undefined
-      ? answer
-      : new Promise<ApprovalOutcome>((resolve) => {
-        const onAbort = () => {
-          signal.removeEventListener('abort', onAbort)
-          resolve('cancelled')
-        }
-        signal.addEventListener('abort', onAbort, { once: true })
-        void answer.then((outcome) => {
-          signal.removeEventListener('abort', onAbort)
-          // After an abort won the race this resolve is a settled-promise no-op:
-          // the late answer is discarded by construction.
-          resolve(outcome)
-        })
-      })
-    try {
-      return await withdraw
-    } finally {
-      // The structured reason keeps a late withdrawal distinct from caller cancellation.
-      lifetime.abort(new Error('approval request settled'))
+    void answer.then((outcome) => { this.settle(pending, outcome) })
+    if (signal !== undefined) {
+      const onAbort = (): void => { this.settle(pending, 'cancelled') }
+      signal.addEventListener('abort', onAbort, { once: true })
+      void pending.outcome.then(() => { signal.removeEventListener('abort', onAbort) })
     }
+    return await pending.outcome
+  }
+
+  /**
+   * Settle one pending decision exactly once and release its answerers.
+   * @param pending - the in-flight decision being settled.
+   * @param outcome - the decision the winning surface produced.
+   * @returns whether this call settled it; `false` means another answer won.
+   */
+  private settle(pending: PendingDecision, outcome: ApprovalOutcome): boolean {
+    if (pending.answered) return false
+    pending.answered = true
+    pending.resolve(outcome)
+    // The structured reason keeps a late withdrawal distinct from caller cancellation.
+    pending.lifetime.abort(new Error('approval request settled'))
+    return true
   }
 }
 

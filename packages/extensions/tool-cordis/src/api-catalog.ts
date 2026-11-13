@@ -418,6 +418,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'session', description: 'session whose log supplies the override.' }],
         returns: 'the last logged policy, or `undefined` without one.',
       },
+      {
+        signature: '@Remote answerLate(agent: Agent, id: ApprovalRequestId, decision: ApprovalDecision): void',
+        description: 'Deliver a decision for a request this Client knows from the projection instead of from a live `approval/request` dispatch. The first answer wins: whichever surface settles the request first appends its single `approval/decided`; a later answer is refused with a structured failure instead of a second audit event.',
+        parameters: [{ name: 'agent', description: 'live agent owning the Session the card was restored for.' }, { name: 'id', description: 'the `approval/asked` identity shown by the projection.' }, { name: 'decision', description: 'the interactive decision the user made.' }],
+        throws: ['{RemoteError} `approval/bad-outcome` for an outcome a Client may not send, `approval/not-pending` when no request by that id awaits a decision, `approval/wrong-session` when the id belongs to another Session, and `approval/already-answered` when another surface already settled it.'],
+      },
     ],
   },
   {
@@ -5627,7 +5633,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ApprovalRequestEvent',
-    declaration: 'export interface ApprovalRequestEvent {\n    readonly agent: Agent;\n    readonly toolName: string;\n    readonly callId?: ToolCallId;\n    readonly reason?: string;\n    readonly displayReason?: {\n        readonly en: string;\n        readonly [locale: string]: string;\n    };\n    readonly signal?: AbortSignal;\n}',
+    declaration: 'export interface ApprovalRequestEvent {\n    readonly agent: Agent;\n    readonly requestId?: ApprovalRequestId;\n    readonly toolName: string;\n    readonly callId?: ToolCallId;\n    readonly reason?: string;\n    readonly displayReason?: {\n        readonly en: string;\n        readonly [locale: string]: string;\n    };\n    readonly signal?: AbortSignal;\n}',
   },
   {
     name: 'ArchiveSessionOptions',

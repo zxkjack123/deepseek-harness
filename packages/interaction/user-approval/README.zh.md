@@ -52,6 +52,8 @@ kind: "package-reference"
 
 `request(req)` 指名 agent、工具、原因、可选的调用 id，以及一个中止信号。可选的 `displayReason` 提供本地化展示文案，不改写日志中的原因。它要求当前处于尚未结束的轮次中：空闲或在轮次之间调用会在审计前抛出异常。中止会撤回问题——请求以 `cancelled` 结算，迟到的回答被丢弃。每个被派发的 answerer 都会收到请求字段，以及一个与调用方信号组合的请求级信号；请求结算后服务用结构化 `Error` 中止它，因此只通过该信号感知撤回的 answerer 会在其他人先决断时撤下自己的提问框。若任一审计事件在提交前失败，请求会被拒绝，而不会返回一项未记录的决定。
 
+作答界面不一定是派发请求的那个界面：页面刷新或重连会丢失仍在等待决定的 live `approval/request` 派发。因此 `approvalState` Projection 会发布每个尚未回答的请求，`answerLate(agent, id, decision)` 可以在没有 live waterfall 的情况下为其中之一递交决定。它是 Remote 方法，浏览器客户端调用 `remote.approval.answerLate`。第一个答案获胜：哪个界面先结算请求，就由它追加唯一一条 `approval/decided`。后到的答案会收到结构化失败——请求仍在收尾时是 `approval/already-answered`，请求已结束或从未存在时是 `approval/not-pending`，id 属于另一个会话时是 `approval/wrong-session`，决定不在 `allowed-once`／`rejected` 之内时是 `approval/bad-outcome`。
+
 ### 模型与用户看到什么
 
 模型只会看到发起请求的消费方最终给出的工具结果——允许、拒绝、取消或不可用——以及运行时上下文快照中的当前策略；审计事件与面向人类的权限 UI 不属于模型上下文。每次策略切换都会以一条带来源的用户消息告知模型，两种策略都会把各自的完整当前含义贡献给快照。
@@ -71,15 +73,15 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | `ApprovalService`：请求分发、私有审批状态、策略写入路径、运行时上下文贡献 |
-| [`src/types.ts`](src/types.ts) | `ApprovalRequestId` brand 与结果类型 |
+| [`src/types.ts`](src/types.ts) | `ApprovalRequestId` brand、结果与决定词汇、对外发布的待决请求视图，以及本服务的 Remote 失败码 |
 
 ### 分发
 
-`decide()` 让应答者 waterfall 与请求信号赛跑，并隔离所有应答者故障：抛出异常的监听器会使问题以 `unavailable` 关闭，不属于结果词汇的异常返回值也会规范化为 `unavailable`。`never` 策略在服务内部、waterfall 分发之前执行，因此之后以 `prepend` 注册的监听器也无法绕过确定性的拒绝。请求必须处于未结束的轮次内，因为轮次是持久日志的提交／回放边界——轮次之间的裸事件与崩溃尾部无法区分。
+`decide()` 让应答者 waterfall 与请求信号赛跑，并隔离所有应答者故障：抛出异常的监听器会使问题以 `unavailable` 关闭，不属于结果词汇的异常返回值也会规范化为 `unavailable`。`never` 策略在服务内部、waterfall 分发之前执行，因此之后以 `prepend` 注册的监听器也无法绕过确定性的拒绝。请求必须处于未结束的轮次内，因为轮次是持久日志的提交／回放边界——轮次之间的裸事件与崩溃尾部无法区分。每个进行中的请求都以审计身份登记，直到其决定提交；waterfall 与 `answerLate` 结算同一条记录，因此该表不会超过并发请求数。
 
 ### 策略与运行时上下文快照
 
-私有的 Host 端 `approvalState` Projection 保存策略覆盖值，以及当前轮次是否仍未结束。其大小不随事件数增长。注册表会将它保存到持久化检查点；事件日志仍是真源。其纯状态更新不会发起问题或授予权限。
+`approvalState` Projection 保存策略覆盖值、当前轮次是否仍未结束，以及尚未折叠 `approval/decided` 的请求。它对外发布的视图就是待决请求列表，因此客户端可以从日志重建提问卡，而不依赖最初展示它的那次派发。其大小不随事件数增长——每个待决请求至多一条。注册表会将它保存到持久化检查点；事件日志仍是真源。其纯状态更新不会发起问题或授予权限。
 
 服务激活会等待 Projection 注册完成；注册失败会使激活失败。服务私有持有返回的读取句柄。宿主和注册表负责会话恢复；审批方法不会在同步读取时加载历史或调用 hydration。参见[注册与恢复 API](../../session/session-projection/README.zh.md)。待处理问题、应答者和授权仍由运行时负责。
 
