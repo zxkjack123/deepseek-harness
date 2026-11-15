@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-child-failure-reminder",
   "description": "Subagent-failure guard plugin: keeps a parent turn open until an abnormal child settlement is handled",
-  "version": "0.2.2-rc.2-local.fe53a98",
+  "version": "0.2.2-rc.2",
   "publishConfig": {
     "access": "public"
   },
