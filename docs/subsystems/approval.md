@@ -89,6 +89,14 @@ The decision does not belong to the surface that displayed it. The `approvalStat
 
 The audit events are log-only and do not enter the model transcript. Model-visible behavior is the caller's derived tool result plus the current runtime-context snapshot. Service disposal removes its context contribution; answerer listeners are independently effect-bound to their owning plugins.
 
+## Pending asks across a reload and a restart
+
+A reload or a reconnect keeps the ask answerable: the live dispatch still holds the request record, `answerLate` settles that record, and the first answer produces the only `approval/decided`.
+
+A process restart does not. The request record exists only in the process that asked, so an ask restored from the log has nothing left to settle it. The service therefore closes every ask that has an `approval/asked` and no live record — at its own start, and again for any ask that later appears without one — with a terminal `approval/decided` of `cancelled`.
+
+Every ask in a Session log reaches a terminal decision: `allowed-once`, `rejected`, or `cancelled`. An ask whose live record is gone is never left with neither event, because a surface that keeps presenting it would accept a decision that can never apply. A surface that answers such an ask by race receives the structured `approval/not-pending` failure and must retire the card instead of presenting the decision as applied.
+
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
 <a id="cordis-surface"></a>

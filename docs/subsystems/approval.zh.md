@@ -89,6 +89,14 @@ interface ApprovalRequest extends ApprovalRequestEvent {
 
 审计事件仅写入日志，不进入模型 transcript（文本记录）。模型可见的行为是调用方派生的工具结果与当前运行时上下文快照。服务 dispose（资源释放）时会移除其上下文贡献；应答者监听器独立地通过 effect 绑定到其所属插件。
 
+## 刷新与重启下的待决请求
+
+刷新或重连之后，请求仍可作答：live 派发那侧的请求记录还在，`answerLate` 结算的就是这条记录，第一个答案产生唯一的 `approval/decided`。
+
+进程重启之后则不是。请求记录只存在于发起它的那个进程里，从日志恢复出来的请求没有任何东西能结算它。因此服务会关闭每一条「有 `approval/asked`、却没有活记录」的请求——在自身启动时关闭一次，此后每当这样的请求出现时再关闭一次——写入终态的 `approval/decided`，结果为 `cancelled`。
+
+会话日志里的每一条请求都必须到达终态：`allowed-once`、`rejected` 或 `cancelled`。活记录已经消失的请求绝不允许两个事件都没有，因为仍在展示它的界面会让用户以为自己的决定生效了，而它永远无法生效。若某个界面仍然对这类请求作答，会收到结构化的 `approval/not-pending` 失败，该界面必须撤下卡片，而不是把这次作答呈现为已生效。
+
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
 <a id="cordis-surface"></a>
