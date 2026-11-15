@@ -236,7 +236,7 @@ export interface Config {
  * changes to the model through the runtime-context snapshot and switch notices.
  */
 export class ApprovalService extends TypertRemoteService {
-  static inject = ['sessionProjections']
+  static inject = ['sessionProjections', 'sessions']
 
   static Config: z<Config> = z.object({
     policy: z.union(['ask', 'never'] as const).default('ask'),
@@ -258,6 +258,16 @@ export class ApprovalService extends TypertRemoteService {
     this.approvalProjectionHandle = await this.ctx.sessionProjections.register(approvalStateDefinition)
     // Registration can finish after an unload has started. Do not add effects then.
     if (this.ctx.fiber.uid === null) return
+
+    // A restart keeps only the projection, so every ask without a live request is terminal.
+    for (const session of this.ctx.sessions.list()) this.cancelOrphanedAsks(session)
+    this.ctx.on('session/created', (session) => {
+      // Creation dispatch holds the log read-only; settle a restored ask once it returns.
+      if (this.approvalStateOf(session).active.length === 0) return
+      void Promise.resolve().then(() => { this.cancelOrphanedAsks(session) }).catch((error: unknown) => {
+        this.ctx.logger.warn(`approval: session "${session.id}" orphaned-ask sweep failed: ${String(error)}`)
+      })
+    })
 
     const effective = (agent: Agent): ApprovalPolicy => this.effectivePolicy(agent.session)
 
@@ -390,11 +400,34 @@ export class ApprovalService extends TypertRemoteService {
   }
 
   /**
+   * Settle every ask the projection still shows as active while no live request
+   * awaits it. A settled ask leaves the projection, so repeating the sweep
+   * appends nothing.
+   * @param session - Session whose asks may be orphaned.
+   */
+  private cancelOrphanedAsks(session: Session): void {
+    const orphaned = this.approvalStateOf(session).active.filter(request => !this.pendings.has(request.id))
+    for (const request of orphaned) this.cancelOrphanedAsk(session, request.id)
+  }
+
+  /**
+   * Append the terminal decision for one ask that only the projection knows.
+   * @param session - Session whose log carries the ask.
+   * @param id - the ask's audit identity.
+   */
+  private cancelOrphanedAsk(session: Session, id: ApprovalRequestId): void {
+    if (!this.approvalStateOf(session).active.some(request => request.id === id)) return
+    session.append('approval/decided', { id, outcome: 'cancelled' })
+  }
+
+  /**
    * Deliver a decision for a request this Client knows from the projection
    * instead of from a live `approval/request` dispatch. The first answer wins:
    * whichever surface settles the request first appends its single
    * `approval/decided`; a later answer is refused with a structured failure
-   * instead of a second audit event.
+   * instead of a second audit event. An ask the projection still shows but no
+   * live dispatch owns is settled `'cancelled'` before the refusal, so it never
+   * stays undecided.
    * @param agent - live agent owning the Session the card was restored for.
    * @param id - the `approval/asked` identity shown by the projection.
    * @param decision - the interactive decision the user made.
@@ -414,6 +447,7 @@ export class ApprovalService extends TypertRemoteService {
     }
     const pending = this.pendings.get(id)
     if (pending === undefined) {
+      this.cancelOrphanedAsk(agent.session, id)
       throw new RemoteError(
         'approval/not-pending',
         `approval request ${id} is not awaiting a decision`,
