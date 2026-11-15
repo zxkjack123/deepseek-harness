@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-rc.2/web-launch-url-file/guide.md
+/:
+  en: 2c8dd5a4bf0313c8
+  zh: 5ab3c743303e138c
+/the-web-app-records-its-authenticated-launch-url:
+  en: 8182608a6ccb2edd
+  zh: 530adedf945e4430
+/the-web-app-records-its-authenticated-launch-url/change:
+  en: 964fe057367c4e5d
+  zh: 9f8156eb46b53ab1
+/the-web-app-records-its-authenticated-launch-url/migration:
+  en: 5ccb4c0300ddcf2a
+  zh: 40b25278c2a4ed8e

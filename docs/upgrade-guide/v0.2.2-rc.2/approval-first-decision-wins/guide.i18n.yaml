@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-rc.2/approval-first-decision-wins/guide.md
+/:
+  en: 77e5decd1bfa42c8
+  zh: 4a0df90ddf33048b
+/the-first-approval-decision-wins-on-every-surface:
+  en: 68dd73638a2a2aba
+  zh: a2e5010b3f5f0d02
+/the-first-approval-decision-wins-on-every-surface/change:
+  en: b5a8e00e4a23fb66
+  zh: 07f6afc13ff044b7
+/the-first-approval-decision-wins-on-every-surface/migration:
+  en: 48858a5a16e0dd6c
+  zh: 3f6b94e0379812c7
